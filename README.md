@@ -1,4 +1,4 @@
-# 🧲 BTorrent — A BitTorrent Client Built From Scratch in C
+# 🧲 BTorrent - A BitTorrent Client Built From Scratch in C
 
 > A fully documented, educational BitTorrent client designed to teach you how
 > peer-to-peer file sharing works at the lowest level.
@@ -9,13 +9,13 @@
 
 By reading and running this code, you will understand:
 
-1. **Bencoding** — BitTorrent's custom serialization format
-2. **Torrent files** — How `.torrent` metadata is structured
-3. **SHA-1 Hashing** — How file integrity is verified piece by piece
-4. **Tracker Protocol** — How clients find peers via HTTP
-5. **Peer Protocol** — The TCP handshake and message wire format
-6. **Piece Management** — How a file is split, downloaded, and reassembled
-7. **Sockets & Networking** — Raw TCP/UDP in C
+1. **Bencoding** - BitTorrent's custom serialization format
+2. **Torrent files** - How `.torrent` metadata is structured
+3. **SHA-1 Hashing** - How file integrity is verified piece by piece
+4. **Tracker Protocol** - How clients find peers via HTTP
+5. **Peer Protocol** - The TCP handshake and message wire format
+6. **Piece Management** - How a file is split, downloaded, and reassembled
+7. **Sockets & Networking** - Raw TCP/UDP in C
 
 ---
 
@@ -86,10 +86,10 @@ Start with the docs, then read the source code alongside them:
 
 ## 🔗 BitTorrent Specification References
 
-- [BEP 0003](https://www.bittorrent.org/beps/bep_0003.html) — The BitTorrent Protocol Specification
-- [BEP 0020](https://www.bittorrent.org/beps/bep_0020.html) — Peer ID Conventions
+- [BEP 0003](https://www.bittorrent.org/beps/bep_0003.html) - The BitTorrent Protocol Specification
+- [BEP 0020](https://www.bittorrent.org/beps/bep_0020.html) - Peer ID Conventions
 - [Bencoding Wikipedia](https://en.wikipedia.org/wiki/Bencode)
-- [RFC 3174](https://tools.ietf.org/html/rfc3174) — SHA-1
+- [RFC 3174](https://tools.ietf.org/html/rfc3174) - SHA-1
 
 ---
 
