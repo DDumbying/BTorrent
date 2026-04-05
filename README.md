@@ -1,5 +1,5 @@
 # BTorrent
-<img src="./assets/images/BT.png" align="left" width="128" hspace="10" vspace="10">
+<img src="./assets/images/BTlow.png" align="left" width="128" hspace="10" vspace="10">
 <b>A BitTorrent Client Built From Scratch in C</b>.
 <br/>A fully documented, educational BitTorrent client designed to teach you how peer-to-peer file sharing works at the lowest level. <br/><br/>
 
