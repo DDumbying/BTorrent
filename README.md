@@ -1,18 +1,16 @@
-<div style="display: flex; align-items: center; gap: 20px;">
+# BTorrent
+<img src="./assets/images/BT.png" align="left" width="128" hspace="10" vspace="10">
+<b>A BitTorrent Client Built From Scratch in C</b>.
+<br/>A fully documented, educational BitTorrent client designed to teach you how peer-to-peer file sharing works at the lowest level. <br/><br/>
 
-  <img src="./assets/images/BT.png" alt="BTorrent Logo" width="100"/>
+**Links:**  [Alsullam](https://github.com/alsullam/), [Doc](https://github.com/alsullam.github.io/)
 
-  <div>
-    <h1>BTorrent - A BitTorrent Client Built From Scratch in C</h1>
-    <p>
-      A fully documented, educational BitTorrent client designed to teach you how
-      peer-to-peer file sharing works at the lowest level.
-    </p>
-  </div>
+BTorrent is a from-scratch BitTorrent client written in C.
+built to expose the inner workings of peer-to-peer systems at a low level. Instead of relying on high-level libraries, the project focuses on implementing the protocol manually - from parsing `.torrent` files and handling bencoded data, to managing TCP connections and exchanging pieces between peers.
 
-</div>
+The goal is not just to download files, but to understand how decentralized networks coordinate, verify data integrity using SHA-1, and distribute load across a swarm efficiently. Each component is intentionally designed to be simple, modular, and well-documented, making it easy to follow the flow from metadata to actual data transfer.
 
-<hr/>
+BTorrent serves as both a learning resource and a systems-level exercise, helping you build intuition around networking, protocol design, and distributed architecture by implementing a real-world protocol step by step.
 
 ## 🎯 What You'll Learn
 
