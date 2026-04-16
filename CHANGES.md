@@ -1,5 +1,38 @@
 # btorrent — Changelog
 
+## v1.1.0 (2026-04-16)
+
+Feature release focusing on IPv6 support and UDP tracker optimization.
+
+### New features
+
+- **UDP connection ID caching** — Per-tracker connection IDs are now cached for 60
+  seconds (BEP 15 spec). Eliminates the extra round-trip to establish a new
+  connection ID on every re-announce. Significant latency improvement for UDP
+  trackers.
+
+- **IPv6 peer support** — btorrent now connects to IPv6 peers in addition to
+  IPv4. Tracker responses with `peers6` bencode key (compact6 format, 18
+  bytes/peer) are parsed and IPv6 peers are stored alongside IPv4 peers.
+  The scheduler uses `tcp_connect_nb_ipv6()` for non-blocking IPv6 connections.
+
+- **Peer struct expanded** — `ip` field widened from 16 to 46 bytes to hold
+  full IPv6 addresses; `is_ipv6` flag added to distinguish address families.
+
+### Protocol changes
+
+- `compact_peers()` now marks peers as `is_ipv6=0`
+- New `compact6_peers()` parses 18-byte compact6 format
+- New `parse_peers_binary()` auto-detects IPv6 (18-byte) vs IPv4 (6-byte)
+- HTTP tracker parses `peers6` bencode key and merges with `peers`
+- UDP announce uses cached connection ID when available
+
+### Tests
+
+- New `test_tracker_v6.c` with 23 tests covering IPv6 parsing and UDP cache
+
+---
+
 ## v1.0.2 (2026-04-15)
 
 Bug-fix release. No behaviour changes for working downloads.

@@ -1,6 +1,6 @@
 # Maintainer: Saeed Hany <saeed@saeeedhany.github.io>
 pkgname=btorrent
-pkgver=1.0.2
+pkgver=1.1.0
 pkgrel=1
 pkgdesc="Concurrent BitTorrent client with DHT, magnet links, seeding, and PEX"
 arch=('linux_amd64' 'linux_aarch64')

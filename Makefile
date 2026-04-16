@@ -5,7 +5,7 @@
 ## Platform: Linux only (epoll-based scheduler)
 
 ## ── Version (single source of truth) ──────────────────────────────────────
-VERSION  = 1.0.2
+VERSION  = 1.1.0
 TARNAME  = btorrent-$(VERSION)
 
 ## ── Toolchain ─────────────────────────────────────────────────────────────
@@ -152,7 +152,13 @@ test_netio: build/obj
 	    src/net/tcp.c $(TEST_COMMON) -o build/test_netio
 	@echo "--- test_netio ---" && ./build/test_netio
 
-test: test_sha1 test_peer test_pieces test_magnet test_ext test_scheduler test_publish test_circuit test_netio
+test_tracker_v6: build/obj
+	$(CC) $(TEST_FLAGS) tests/unit/test_tracker_v6.c \
+	    src/proto/tracker.c src/core/bencode.c \
+	    $(TEST_COMMON) -lcurl -o build/test_tracker_v6
+	@echo "--- test_tracker_v6 ---" && ./build/test_tracker_v6
+
+test: test_sha1 test_peer test_pieces test_magnet test_ext test_scheduler test_publish test_circuit test_netio test_tracker_v6
 
 ## ── Clean ─────────────────────────────────────────────────────────────────
 clean:
@@ -163,5 +169,5 @@ distclean: clean
 
 .PHONY: all debug install uninstall dist \
         test test_sha1 test_peer test_pieces test_magnet test_ext test_scheduler test_publish \
-        test_circuit test_netio \
+        test_circuit test_netio test_tracker_v6 \
         clean distclean

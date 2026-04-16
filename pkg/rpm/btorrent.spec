@@ -1,10 +1,10 @@
 Name:           btorrent
-Version:        1.0.2
+Version:        1.1.0
 Release:        1%{?dist}
 Summary:        Concurrent BitTorrent client with DHT and magnet link support
 
 License:        MIT
-URL:            https://saeeedhany.github.io/btorrent
+URL:            https://alsullam.github.io/btorrent
 Source0:        %{name}-%{version}.tar.gz
 
 BuildRequires:  gcc

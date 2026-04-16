@@ -946,12 +946,17 @@ static int accept_incoming(int lsock, int epfd, Session *sessions, int max_s) {
 
 static int open_connection(Session *sessions, int max_s,
                             Session *s, int epfd, int idx,
-                            const char *ip, uint16_t port, time_t now) {
+                            const char *ip, uint16_t port, int is_ipv6, time_t now) {
     if (is_circuit_open(sessions, max_s, ip, now)) {
         LOG_DEBUG("sched: circuit breaker open for %s:%d — skipping", ip, port);
         return -1;
     }
-    int sock = tcp_connect_nb(ip, port);
+    int sock;
+    if (is_ipv6) {
+        sock = tcp_connect_nb_ipv6(ip, port);
+    } else {
+        sock = tcp_connect_nb(ip, port);
+    }
     if (sock < 0) return -1;
     session_init(s, sock, ip, port, /*incoming=*/0);
     struct epoll_event ev = { .events = EPOLLOUT | EPOLLET, .data.u32 = (uint32_t)idx };
@@ -1013,7 +1018,7 @@ int scheduler_run(const TorrentInfo *torrent,
     for (int i = 0; i < max_s && peer_cursor < peers->count; i++) {
         const Peer *p = &peers->peers[peer_cursor++];
         time_t now = time(NULL);
-        if (open_connection(sessions, max_s, &sessions[i], epfd, i, p->ip, p->port, now) == 0) active++;
+        if (open_connection(sessions, max_s, &sessions[i], epfd, i, p->ip, p->port, p->is_ipv6, now) == 0) active++;
     }
     LOG_INFO("sched: %d connections opened (max %d)", active, max_s);
 
@@ -1221,7 +1226,7 @@ int scheduler_run(const TorrentInfo *torrent,
             if (downloading && peer_cursor < peers->count) {
                 const Peer *p = &peers->peers[peer_cursor++];
                 time_t now = time(NULL);
-                if (open_connection(sessions, max_s, &sessions[i], epfd, i, p->ip, p->port, now) == 0)
+                if (open_connection(sessions, max_s, &sessions[i], epfd, i, p->ip, p->port, p->is_ipv6, now) == 0)
                     dead--;
             }
         }

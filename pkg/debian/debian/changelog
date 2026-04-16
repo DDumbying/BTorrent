@@ -1,6 +1,6 @@
-btorrent (1.0.2-1) unstable; urgency=low
+btorrent (1.1.0-1) unstable; urgency=low
 
-  * Initial Debian packaging.
+  * v1.1.0: IPv6 peer support and UDP connection ID caching.
   * Concurrent BitTorrent client with DHT, magnet links (BEP 9/10),
     seeding, PEX (BEP 11), rate limiting, endgame mode, and file locking.
 

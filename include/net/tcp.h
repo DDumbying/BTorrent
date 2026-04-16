@@ -21,6 +21,8 @@
  */
 int tcp_connect_nb(const char *ip, uint16_t port);
 
+int tcp_connect_nb_ipv6(const char *ip, uint16_t port);
+
 /**
  * tcp_finish_connect — called after epoll reports EPOLLOUT on a connecting fd.
  *
