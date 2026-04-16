@@ -7,7 +7,9 @@ A fully documented, educational BitTorrent client designed to teach you how peer
 
 **Links:** [GitHub](https://github.com/alsullam/) · [Documentation](https://alsullam.github.io/projects/btorrent/)
 
----
+BTorrent is a from-scratch BitTorrent client written in C, built to expose the inner workings of peer-to-peer systems at a low level. Instead of relying on high-level libraries, the project implements the protocol manually - from parsing `.torrent` files and handling bencoded data, to managing concurrent TCP connections and exchanging pieces across a swarm.
+
+The goal is not just to download files, but to understand how decentralized networks coordinate, verify data integrity using SHA-1, and distribute load across peers efficiently. Each component is intentionally simple, modular, and well-documented.
 
 ## Features
 
@@ -27,8 +29,6 @@ A fully documented, educational BitTorrent client designed to teach you how peer
 | Rate limiting | Done | - |
 | File locking | Done | - |
 
----
-
 ## Building
 
 ```bash
@@ -41,8 +41,6 @@ make debug    # Debug build with AddressSanitizer
 make test     # Run all tests
 make clean    # Clean build artifacts
 ```
-
----
 
 ## Usage
 
@@ -102,8 +100,6 @@ btorrent -d ubuntu.torrent -v -l debug.log
 btorrent -d "magnet:?xt=urn:btih:..."
 ```
 
----
-
 ## Project Structure
 
 ```
@@ -144,8 +140,6 @@ btorrent/
 └── tests/                Test suites
 ```
 
----
-
 ## Documentation
 
 Read the documentation in order:
@@ -156,8 +150,6 @@ Read the documentation in order:
 4. `docs/chapters/04_tracker.md` - Tracker protocol
 5. `docs/chapters/05_peer_protocol.md` - Peer wire protocol
 6. `docs/chapters/06_pieces.md` - Piece management
-
----
 
 ## BitTorrent Specification References
 
