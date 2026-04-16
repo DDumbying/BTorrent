@@ -1,0 +1,7 @@
+btorrent (1.0.2-1) unstable; urgency=low
+
+  * Initial Debian packaging.
+  * Concurrent BitTorrent client with DHT, magnet links (BEP 9/10),
+    seeding, PEX (BEP 11), rate limiting, endgame mode, and file locking.
+
+ -- Saeed Hany <saeed@saeeedhany.github.io>  Sun, 13 Apr 2026 00:00:00 +0000

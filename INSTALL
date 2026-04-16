@@ -1,0 +1,66 @@
+Installation instructions for btorrent
+======================================
+
+Quick install
+-------------
+
+    make
+    sudo make install
+
+This installs:
+  /usr/local/bin/btorrent
+  /usr/local/share/man/man1/btorrent.1
+
+To install under /usr instead:
+
+    sudo make install PREFIX=/usr
+
+Staged install (for packaging)
+-------------------------------
+
+    make install DESTDIR=/tmp/pkg PREFIX=/usr
+
+This installs into /tmp/pkg/usr/... without touching the live system,
+which is the standard pattern for Debian, RPM, and AUR packages.
+
+Build dependencies
+------------------
+
+  - C11 compiler: GCC >= 9 or Clang >= 11
+  - libcurl >= 7.x  (Debian/Ubuntu: libcurl4-openssl-dev)
+  - pkg-config
+
+On Debian / Ubuntu:
+
+    sudo apt install build-essential libcurl4-openssl-dev pkg-config
+
+On Fedora / RHEL:
+
+    sudo dnf install gcc libcurl-devel pkgconf-pkg-config
+
+On Arch Linux:
+
+    sudo pacman -S base-devel curl pkgconf
+
+Uninstall
+---------
+
+    sudo make uninstall
+
+Or manually:
+
+    rm -f /usr/local/bin/btorrent
+    rm -f /usr/local/share/man/man1/btorrent.1
+
+Source tarball
+--------------
+
+    make dist
+
+Produces btorrent-<VERSION>.tar.gz in the current directory.
+
+Platform notes
+--------------
+
+btorrent uses Linux's epoll(7) API and is Linux-only. It will not build
+on macOS or BSD without replacing the scheduler with kqueue or libuv.

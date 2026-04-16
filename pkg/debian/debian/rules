@@ -1,0 +1,15 @@
+#!/usr/bin/make -f
+%:
+	dh $@
+
+override_dh_auto_build:
+	$(MAKE) VERSION=$(DEB_VERSION_UPSTREAM) all
+
+override_dh_auto_test:
+	$(MAKE) test
+
+override_dh_auto_install:
+	$(MAKE) install \
+		DESTDIR=$(CURDIR)/debian/btorrent \
+		PREFIX=/usr \
+		VERSION=$(DEB_VERSION_UPSTREAM)

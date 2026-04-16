@@ -1,0 +1,22 @@
+Source: btorrent
+Section: net
+Priority: optional
+Maintainer: Saeed Hany <saeed@saeeedhany.github.io>
+Build-Depends: debhelper-compat (= 13), libcurl4-openssl-dev, pkg-config
+Standards-Version: 4.6.2
+Homepage: https://saeeedhany.github.io/btorrent
+Rules-Requires-Root: no
+
+Package: btorrent
+Architecture: linux-any
+Depends: ${shlibs:Depends}, ${misc:Depends}
+Description: Concurrent BitTorrent client
+ btorrent is a command-line BitTorrent client for Linux by Saeed Hany.
+ It uses an epoll-based scheduler to manage concurrent peer connections
+ and implements rarest-first piece selection with block-level pipelining.
+ .
+ Features: DHT peer discovery, magnet links (BEP 9/10 metadata fetch),
+ seeding, Peer Exchange (BEP 11), rate limiting, resume, endgame mode,
+ and file locking to prevent simultaneous instances.
+ .
+ Protocols: BEP 3, 5, 9, 10, 11, 12, 15.
