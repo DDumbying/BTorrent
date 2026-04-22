@@ -5,7 +5,7 @@
 
 A fully documented, educational BitTorrent client designed to teach you how peer-to-peer file sharing works at the lowest level.
 
-**Links:** [GitHub](https://github.com/alsullam/) · [Documentation](https://alsullam.github.io/projects/btorrent/)
+**Links:** [GitHub](https://github.com/alsullam/) · [Documentation](https://ddumbying.github.io/projects/btorrent/)
 
 BTorrent is a from-scratch BitTorrent client written in C, built to expose the inner workings of peer-to-peer systems at a low level. Instead of relying on high-level libraries, the project implements the protocol manually - from parsing `.torrent` files and handling bencoded data, to managing concurrent TCP connections and exchanging pieces across a swarm.
 
