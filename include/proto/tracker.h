@@ -5,6 +5,7 @@
 
 #include "core/torrent.h"
 #include <stdint.h>
+#include <signal.h>
 
 typedef struct {
     char     ip[46];
@@ -29,6 +30,15 @@ uint64_t udp_cache_get(UdpConnCache *cache, const char *host, int64_t now);
 void udp_cache_set(UdpConnCache *cache, const char *host, uint64_t conn_id, int64_t expires_at);
 
 void     generate_peer_id(uint8_t *out);
+
+/**
+ * tracker_set_abort_flag — make announces interruptible.
+ * Once *flag is non-zero, pending announces, retries and backoff sleeps
+ * return early. "stopped" announces are exempt so they can still be sent
+ * on shutdown (with a short timeout, stopping at the first tracker that
+ * replies). Call once at startup.
+ */
+void     tracker_set_abort_flag(volatile sig_atomic_t *flag);
 
 PeerList tracker_announce(const TorrentInfo *torrent,
                           const uint8_t     *peer_id,
@@ -67,4 +77,3 @@ void peer_list_free(PeerList *pl);
 
 PeerList compact_peers(const uint8_t *d, size_t len);
 PeerList compact6_peers(const uint8_t *d, size_t len);
-PeerList parse_peers_binary(const uint8_t *data, size_t len);

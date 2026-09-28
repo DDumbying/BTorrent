@@ -7,7 +7,7 @@
  * -------------------------------------------
  *  1. TCP connect (blocking, with SO_RCVTIMEO / SO_SNDTIMEO).
  *  2. Standard BitTorrent handshake (68 bytes each way).
- *     - We set reserved byte 20 bit 0x10 (extension protocol bit, BEP 10).
+ *     - We set reserved[5] (handshake byte 25) bit 0x10: extension protocol, BEP 10.
  *  3. BEP 10 extension handshake (MSG_ID 20).
  *     - We send: d8:ut_metadatai1ee  (we want ut_metadata as ext msg 1)
  *     - We parse their response for:
@@ -30,6 +30,7 @@
  */
 
 #include "proto/ext.h"
+#include "proto/ext_handshake.h"
 #include "core/torrent.h"
 #include "core/bencode.h"
 #include "core/sha1.h"
@@ -126,7 +127,7 @@ static int do_handshake(int sock,
     hs[0] = PSTRLEN;
     memcpy(hs + 1,  PSTR,       PSTRLEN);
     memset(hs + 20, 0,          8);
-    hs[25] = 0x11;                  /* BEP-10 extension bit + BEP-5 DHT bit */
+    hs[25] = 0x10;                  /* reserved[5] & 0x10: BEP-10 extensions */
     memcpy(hs + 28, info_hash,  20);
     memcpy(hs + 48, our_peer_id, 20);
 
@@ -203,21 +204,6 @@ static int recv_wire_msg(int sock, uint8_t **out_payload, uint32_t *out_plen) {
  * Rather than writing a full encoder, we just build these strings directly —
  * the format is fixed enough to hardcode.
  */
-
-static int build_ext_handshake(uint8_t *buf, size_t cap) {
-    /* d1:md11:ut_metadatai1ee1:v15:btorrent/0.9.0e */
-    int n = snprintf((char *)buf, cap,
-        "d"
-            "1:m"  "d"
-                "11:ut_metadata" "i%de"
-            "e"
-            "1:q" "i%de"          /* queue depth hint (we'll request 1 at a time) */
-            "1:v" "15:btorrent/1.1.0"
-        "e",
-        UT_META_LOCAL_ID,
-        1);
-    return (n > 0 && (size_t)n < cap) ? n : -1;
-}
 
 static int build_meta_request(uint8_t *buf, size_t cap, int piece) {
     /* d8:msg_typei0e5:piecei<N>ee */
@@ -377,7 +363,9 @@ static TorrentInfo *torrent_info_from_raw_dict(const uint8_t *dict,
 static TorrentInfo *try_peer_metadata(const char    *ip,
                                       uint16_t       port,
                                       const uint8_t *info_hash,
-                                      const uint8_t *our_peer_id) {
+                                      const uint8_t *our_peer_id,
+                                      volatile sig_atomic_t *interrupted) {
+#define EXT_INTERRUPTED() (interrupted && *interrupted)
     LOG_DEBUG("ext: trying %s:%d", ip, port);
 
     int sock = tcp_connect_timed(ip, port, PEER_TIMEOUT_S);
@@ -401,7 +389,8 @@ static TorrentInfo *try_peer_metadata(const char    *ip,
 
     /* ── Step 2: send our BEP-10 extension handshake ── */
     uint8_t ext_hs_body[256];
-    int ext_hs_len = build_ext_handshake(ext_hs_body, sizeof(ext_hs_body));
+    int ext_hs_len = ext_build_handshake(ext_hs_body, sizeof(ext_hs_body),
+                                         UT_META_LOCAL_ID, 0, 1);
     if (ext_hs_len < 0 ||
         send_wire_msg(sock, EXT_MSGID, ext_hs_body, (uint32_t)ext_hs_len) < 0) {
         LOG_DEBUG("ext: %s:%d failed to send ext handshake", ip, port);
@@ -410,7 +399,7 @@ static TorrentInfo *try_peer_metadata(const char    *ip,
 
     /* ── Step 3: receive peer's ext handshake ── */
     ExtHandshake eh = {0};
-    for (int retries = 0; retries < 10; retries++) {
+    for (int retries = 0; retries < 10 && !EXT_INTERRUPTED(); retries++) {
         uint8_t *payload = NULL; uint32_t plen = 0;
         int id = recv_wire_msg(sock, &payload, &plen);
         if (id < 0) { free(payload); close(sock); return NULL; }
@@ -448,7 +437,8 @@ static TorrentInfo *try_peer_metadata(const char    *ip,
     int *received = xcalloc((size_t)num_blocks, sizeof(int));
     int blocks_done = 0;
 
-    for (int blk = 0; blk < num_blocks && blocks_done < num_blocks; blk++) {
+    for (int blk = 0; blk < num_blocks && blocks_done < num_blocks &&
+                      !EXT_INTERRUPTED(); blk++) {
         if (received[blk]) continue;  /* already got this one */
 
         /* Send request for this block */
@@ -463,7 +453,8 @@ static TorrentInfo *try_peer_metadata(const char    *ip,
 
         /* Wait for a response — accept any message, skip non-metadata ones */
         int got_response = 0;
-        for (int attempt = 0; attempt < 10 && !got_response; attempt++) {
+        for (int attempt = 0; attempt < 10 && !got_response &&
+                              !EXT_INTERRUPTED(); attempt++) {
             uint8_t *payload = NULL; uint32_t plen = 0;
             int id = recv_wire_msg(sock, &payload, &plen);
             if (id < 0) {
@@ -528,6 +519,7 @@ peer_done:
     free(metadata);
     free(received);
     return result;
+#undef EXT_INTERRUPTED
 }
 
 /* ── Parallel Metadata Fetch ────────────────────────────────────────────────── */
@@ -552,12 +544,13 @@ static void *meta_fetch_worker(void *arg) {
         if (a->interrupted && atomic_load(a->interrupted)) { break; }
 
         const Peer *p = &a->peers[a->start + i];
-        TorrentInfo *ti = try_peer_metadata(p->ip, p->port, a->info_hash, a->peer_id);
+        TorrentInfo *ti = try_peer_metadata(p->ip, p->port, a->info_hash,
+                                            a->peer_id, a->interrupted);
         if (ti) {
             if (!atomic_exchange(a->done, 1)) {
                 a->result = ti;
             } else {
-                free(ti);
+                torrent_free(ti);   /* another thread won; free fully */
             }
             break;
         }
@@ -582,6 +575,7 @@ TorrentInfo *ext_fetch_metadata(const PeerList *peers,
 
     atomic_int done = 0;
     pthread_t threads[META_FETCH_THREADS];
+    int       started[META_FETCH_THREADS] = {0};
     MetaFetchArgs args[META_FETCH_THREADS];
 
     int peers_per_thread = (limit + META_FETCH_THREADS - 1) / META_FETCH_THREADS;
@@ -596,16 +590,14 @@ TorrentInfo *ext_fetch_metadata(const PeerList *peers,
             .result = NULL,
         };
         memcpy(args[t].peer_id, our_peer_id, 20);
-        if (args[t].count > 0) {
-            pthread_create(&threads[t], NULL, meta_fetch_worker, &args[t]);
-        }
+        if (args[t].count > 0 &&
+            pthread_create(&threads[t], NULL, meta_fetch_worker, &args[t]) == 0)
+            started[t] = 1;
     }
 
     TorrentInfo *result = NULL;
     for (int t = 0; t < META_FETCH_THREADS; t++) {
-        if (args[t].count > 0) {
-            pthread_join(threads[t], NULL);
-        }
+        if (started[t]) pthread_join(threads[t], NULL);
         if (args[t].result) {
             result = args[t].result;
             LOG_INFO("%s", "ext: metadata fetched");

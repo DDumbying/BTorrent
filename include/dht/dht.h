@@ -8,13 +8,14 @@
  * Usage:
  *   DhtCtx *dht = dht_new(6881);
  *   dht_bootstrap(dht);                          // contact well-known nodes
- *   PeerList peers = dht_get_peers(dht, info_hash, 10);  // 10s timeout
+ *   PeerList peers = dht_get_peers(dht, info_hash, 10, &flag);  // 10s timeout
  *   dht_free(dht);
  */
 
 #include "proto/tracker.h"   /* PeerList */
 #include <stdint.h>
 #include <stddef.h>
+#include <signal.h>
 
 typedef struct DhtCtx DhtCtx;
 
@@ -28,11 +29,13 @@ void     dht_bootstrap(DhtCtx *ctx);
  * dht_get_peers — find peers for info_hash via the DHT.
  *
  * Performs an iterative Kademlia lookup, collecting peers from responding
- * nodes. Blocks for up to timeout_s seconds.
+ * nodes. Blocks for up to timeout_s seconds, or until *interrupted becomes
+ * non-zero (interrupted may be NULL).
  *
  * Returns a PeerList (caller must peer_list_free() it).
  */
-PeerList dht_get_peers(DhtCtx *ctx, const uint8_t *info_hash, int timeout_s);
+PeerList dht_get_peers(DhtCtx *ctx, const uint8_t *info_hash, int timeout_s,
+                       volatile sig_atomic_t *interrupted);
 
 /** Free a DHT context and close its socket. */
 void     dht_free(DhtCtx *ctx);

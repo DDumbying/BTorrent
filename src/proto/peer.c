@@ -239,7 +239,10 @@ void peer_msg_free(PeerMsg *msg) {
     msg->piece_data = NULL;
 }
 
+/* Callers must still bound piece_index above by the bitfield length;
+ * negative indices (e.g. a wire uint32 cast to int) are rejected here. */
 int bitfield_has_piece(const uint8_t *bitfield, int piece_index) {
+    if (piece_index < 0) return 0;
     int byte_idx = piece_index / 8;
     int bit_idx  = 7 - (piece_index % 8);
     return (bitfield[byte_idx] >> bit_idx) & 1;
@@ -247,5 +250,6 @@ int bitfield_has_piece(const uint8_t *bitfield, int piece_index) {
 
 /* Extracted from main.c where it was duplicated */
 void bitfield_set_piece(uint8_t *bitfield, int piece_index) {
+    if (piece_index < 0) return;
     bitfield[piece_index / 8] |= (uint8_t)(0x80 >> (piece_index % 8));
 }

@@ -13,6 +13,7 @@
 #include "core/pieces.h"
 #include "core/sha1.h"
 #include "core/torrent.h"
+#include "core/bencode.h"
 #include "proto/peer.h"
 #include "utils.h"
 #include "log.h"
@@ -22,6 +23,7 @@
 #include <stdint.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <limits.h>
 
 static int passed = 0, failed = 0;
 #define ASSERT(cond, label) \
@@ -231,6 +233,126 @@ static void test_resume(void) {
     unlink(tmp);
 }
 
+/* ── Security regressions: peer-controlled block offsets ─────────────────── */
+static void test_on_block_rejects_hostile_offsets(void) {
+    const char *tmp = "/tmp/bt_test_hostile.bin";
+    unlink(tmp);
+    TorrentInfo *t = make_test_torrent(2 * BLOCK_SIZE, 1, tmp, 1);
+    PieceManager *pm = piece_manager_new(t, tmp);
+    uint8_t blk[BLOCK_SIZE] = {0};
+
+    /* begin + len overflowed int and passed the old bounds check */
+    ASSERT(piece_manager_on_block(pm, 0, INT_MAX - 10, blk, 64) == 0,
+           "on_block: begin near INT_MAX rejected");
+    ASSERT(piece_manager_on_block(pm, 0, -BLOCK_SIZE, blk, BLOCK_SIZE) == 0,
+           "on_block: negative begin rejected");
+    ASSERT(piece_manager_on_block(pm, 0, 100, blk, BLOCK_SIZE) == 0,
+           "on_block: unaligned begin rejected");
+    ASSERT(piece_manager_on_block(pm, 0, 0, blk, 1) == 0,
+           "on_block: short block rejected");
+    ASSERT(piece_manager_on_block(pm, 0, 0, blk, 0) == 0,
+           "on_block: empty block rejected");
+    ASSERT(pm->pieces[0].blocks_done == 0 && pm->pieces[0].data == NULL,
+           "on_block: rejected blocks allocate nothing");
+
+    piece_manager_free(pm);
+    free(t->pieces_hash); free(t);
+    unlink(tmp);
+}
+
+static void test_bitfield_negative_index(void) {
+    uint8_t bf[4] = {0};
+    bitfield_set_piece(bf, INT_MIN);   /* (int)0x80000000 from a HAVE msg */
+    bitfield_set_piece(bf, -1);
+    ASSERT(bf[0] == 0 && bf[3] == 0,
+           "bitfield: negative index ignored by set");
+    ASSERT(bitfield_has_piece(bf, INT_MIN) == 0,
+           "bitfield: negative index reads as absent");
+}
+
+/* ── Security regressions: untrusted torrent metadata ────────────────────── */
+
+/* Write `body` (with `npieces` 20-byte hashes appended at the "%P" marker)
+ * to a temp file and parse it. */
+static TorrentInfo *parse_torrent_bytes(const char *before, int npieces,
+                                        const char *after) {
+    const char *path = "/tmp/bt_test_meta.torrent";
+    FILE *f = fopen(path, "wb");
+    if (!f) return NULL;
+    fprintf(f, "%s%d:", before, npieces * 20);
+    for (int i = 0; i < npieces * 20; i++) fputc('A', f);
+    fputs(after, f);
+    fclose(f);
+    TorrentInfo *t = torrent_parse(path);
+    unlink(path);
+    return t;
+}
+
+static void test_torrent_validation(void) {
+    TorrentInfo *t;
+
+    t = parse_torrent_bytes(
+        "d4:infod6:lengthi5e4:name2:ok12:piece lengthi16384e6:pieces", 1, "ee");
+    ASSERT(t != NULL, "torrent: valid single-file accepted");
+    torrent_free(t);
+
+    t = parse_torrent_bytes(
+        "d4:infod5:filesld6:lengthi5e4:pathl3:sub1:xeee"
+        "4:name2:ok12:piece lengthi16384e6:pieces", 1, "ee");
+    ASSERT(t != NULL && strcmp(t->files[0].path, "ok/sub/x") == 0,
+           "torrent: valid multi-file accepted with joined path");
+    torrent_free(t);
+
+    t = parse_torrent_bytes(
+        "d4:infod6:lengthi5e4:name9:../escape12:piece lengthi16384e6:pieces", 1, "ee");
+    ASSERT(t == NULL, "torrent: name with '../' rejected");
+
+    t = parse_torrent_bytes(
+        "d4:infod6:lengthi5e4:name2:..12:piece lengthi16384e6:pieces", 1, "ee");
+    ASSERT(t == NULL, "torrent: name '..' rejected");
+
+    t = parse_torrent_bytes(
+        "d4:infod5:filesld6:lengthi5e4:pathl2:..6:escapeeee"
+        "4:name2:ok12:piece lengthi16384e6:pieces", 1, "ee");
+    ASSERT(t == NULL, "torrent: '..' path component rejected");
+
+    t = parse_torrent_bytes(
+        "d4:infod5:filesld6:lengthi5e4:pathl9:/etc/evileee"
+        "4:name2:ok12:piece lengthi16384e6:pieces", 1, "ee");
+    ASSERT(t == NULL, "torrent: path component containing '/' rejected");
+
+    t = parse_torrent_bytes(
+        "d4:infod6:lengthi5e4:name2:ok12:piece lengthi0e6:pieces", 1, "ee");
+    ASSERT(t == NULL, "torrent: piece length 0 rejected (was SIGFPE)");
+
+    t = parse_torrent_bytes(
+        "d4:infod6:lengthi5e4:name2:ok12:piece lengthi-16384e6:pieces", 1, "ee");
+    ASSERT(t == NULL, "torrent: negative piece length rejected");
+
+    t = parse_torrent_bytes(
+        "d4:infod6:lengthi-5e4:name2:ok12:piece lengthi16384e6:pieces", 1, "ee");
+    ASSERT(t == NULL, "torrent: negative length rejected");
+
+    t = parse_torrent_bytes(
+        "d4:infod6:lengthi5e4:name2:ok12:piece lengthi16384e6:pieces", 3, "ee");
+    ASSERT(t == NULL, "torrent: piece count / length mismatch rejected");
+}
+
+static void test_bencode_depth_limit(void) {
+    size_t n = 100000;
+    uint8_t *deep = xmalloc(2 * n);
+    memset(deep, 'l', n);
+    memset(deep + n, 'e', n);
+    BencodeNode *root = bencode_parse(deep, 2 * n);
+    ASSERT(root == NULL, "bencode: 100k nested lists rejected without crash");
+    free(deep);
+
+    const char *ok = "lllleeee";
+    root = bencode_parse((const uint8_t *)ok, strlen(ok));
+    ASSERT(root != NULL, "bencode: shallow nesting still accepted");
+    bencode_free(root);
+}
+
 int main(void) {
     log_init(LOG_ERROR, NULL);   /* suppress noise in test output */
     printf("=== Piece Manager Tests ===\n");
@@ -240,6 +362,10 @@ int main(void) {
     test_next_needed_skips_complete();
     test_next_needed_peer_filter();
     test_resume();
+    test_on_block_rejects_hostile_offsets();
+    test_bitfield_negative_index();
+    test_torrent_validation();
+    test_bencode_depth_limit();
     printf("\n%d passed, %d failed\n", passed, failed);
     return failed ? EXIT_FAILURE : EXIT_SUCCESS;
 }

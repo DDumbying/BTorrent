@@ -325,15 +325,24 @@ int piece_manager_on_block(PieceManager  *pm,
     PieceStatus *ps = &pm->pieces[piece_idx];
     if (ps->state == PIECE_COMPLETE) return 1;
 
+    /* Validate before allocating or copying: begin and len come straight
+     * off the wire. Blocks must be BLOCK_SIZE-aligned and exactly the size
+     * we request (the last block of a piece may be shorter). Using 64-bit
+     * arithmetic avoids the signed overflow in begin + len. */
+    if (begin < 0 || len <= 0 || begin % BLOCK_SIZE != 0) return 0;
+    if ((long long)begin + len > ps->piece_length) return 0;
+    int expected = ps->piece_length - begin < BLOCK_SIZE
+                 ? ps->piece_length - begin : BLOCK_SIZE;
+    if (len != expected) return 0;
+
     if (ps->state == PIECE_EMPTY || ps->state == PIECE_ASSIGNED) {
         ps->data  = xmalloc((size_t)ps->piece_length);
         ps->state = PIECE_ACTIVE;
     }
-    if (begin < 0 || begin + len > ps->piece_length) return 0;
     memcpy(ps->data + begin, data, (size_t)len);
 
     int block_idx = begin / BLOCK_SIZE;
-    if (block_idx < ps->num_blocks && !ps->block_received[block_idx]) {
+    if (!ps->block_received[block_idx]) {
         ps->block_received[block_idx] = 1;
         ps->blocks_done++;
     }

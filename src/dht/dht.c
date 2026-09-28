@@ -48,6 +48,7 @@ typedef struct {
     struct sockaddr_in addr;
     int               queried;
     int               responded;
+    uint8_t           tid[2];      /* transaction id of our pending query */
 } DhtNode;
 
 struct DhtCtx {
@@ -151,7 +152,8 @@ static int parse_peers(const uint8_t *data, size_t len,
         struct in_addr a;
         memcpy(&a, data + i, 4);
         inet_ntop(AF_INET, &a, out[count].ip, sizeof(out[count].ip));
-        out[count].port = (uint16_t)((data[i + 4] << 8) | data[i + 5]);
+        out[count].port    = (uint16_t)((data[i + 4] << 8) | data[i + 5]);
+        out[count].is_ipv6 = 0;
         if (out[count].port > 0) count++;
     }
     return count;
@@ -212,7 +214,8 @@ void dht_bootstrap(DhtCtx *ctx) {
     }
 }
 
-PeerList dht_get_peers(DhtCtx *ctx, const uint8_t *info_hash, int timeout_s) {
+PeerList dht_get_peers(DhtCtx *ctx, const uint8_t *info_hash, int timeout_s,
+                       volatile sig_atomic_t *interrupted) {
     PeerList result = { NULL, 0, 1800 };
     if (ctx->num_nodes == 0) {
         LOG_WARN("%s", "dht: no bootstrap nodes");
@@ -229,7 +232,8 @@ PeerList dht_get_peers(DhtCtx *ctx, const uint8_t *info_hash, int timeout_s) {
     time_t  deadline = time(NULL) + timeout_s;
     int     round    = 0;
 
-    while (time(NULL) < deadline && num_found < 200) {
+    while (time(NULL) < deadline && num_found < 200 &&
+           !(interrupted && *interrupted)) {
         round++;
         int sent = 0;
 
@@ -242,6 +246,7 @@ PeerList dht_get_peers(DhtCtx *ctx, const uint8_t *info_hash, int timeout_s) {
             if (nd->queried) continue;
             nd->queried = 1;
             random_bytes(tid, sizeof(tid));
+            memcpy(nd->tid, tid, sizeof(tid));
             int mlen = build_get_peers(msg, sizeof(msg),
                                         ctx->our_id, info_hash,
                                         tid, sizeof(tid));
@@ -254,7 +259,7 @@ PeerList dht_get_peers(DhtCtx *ctx, const uint8_t *info_hash, int timeout_s) {
 
         /* Collect responses for up to 2 s */
         time_t round_end = time(NULL) + 2;
-        while (time(NULL) < round_end) {
+        while (time(NULL) < round_end && !(interrupted && *interrupted)) {
             struct sockaddr_in from = {0};
             socklen_t flen = sizeof(from);
             ssize_t rlen = recvfrom(ctx->sock, resp, sizeof(resp), 0,
@@ -277,24 +282,37 @@ PeerList dht_get_peers(DhtCtx *ctx, const uint8_t *info_hash, int timeout_s) {
                 continue;
             }
 
-            /* Mark responder */
+            /* Only accept replies to our own queries: the sender must be a
+             * node we queried that has not answered yet, and it must echo
+             * that query's transaction id. Anything else is unsolicited and
+             * could be an attempt to inject fake peers. */
             char fip[INET_ADDRSTRLEN];
             inet_ntop(AF_INET, &from.sin_addr, fip, sizeof(fip));
             uint16_t fport = ntohs(from.sin_port);
+            DhtNode *responder = NULL;
             for (int i = 0; i < ctx->num_nodes; i++) {
-                char nip[INET_ADDRSTRLEN];
-                inet_ntop(AF_INET, &ctx->nodes[i].addr.sin_addr,
-                           nip, sizeof(nip));
-                if (ctx->nodes[i].addr.sin_port == htons(fport) &&
-                    strcmp(nip, fip) == 0) {
-                    ctx->nodes[i].responded = 1;
-                    BencodeNode *id_n = bencode_dict_get(r, "id");
-                    if (id_n && id_n->type == BENCODE_STR &&
-                        id_n->str.len >= DHT_ID_LEN)
-                        memcpy(ctx->nodes[i].id, id_n->str.data, DHT_ID_LEN);
+                DhtNode *nd = &ctx->nodes[i];
+                if (nd->addr.sin_addr.s_addr == from.sin_addr.s_addr &&
+                    nd->addr.sin_port == from.sin_port) {
+                    responder = nd;
                     break;
                 }
             }
+            BencodeNode *t = bencode_dict_get(root, "t");
+            if (!responder || !responder->queried || responder->responded ||
+                !t || t->type != BENCODE_STR ||
+                t->str.len != sizeof(responder->tid) ||
+                memcmp(t->str.data, responder->tid, sizeof(responder->tid)) != 0) {
+                LOG_DEBUG("dht: dropping unsolicited reply from %s:%d",
+                          fip, (int)fport);
+                bencode_free(root);
+                continue;
+            }
+            responder->responded = 1;
+            BencodeNode *id_n = bencode_dict_get(r, "id");
+            if (id_n && id_n->type == BENCODE_STR &&
+                id_n->str.len == DHT_ID_LEN)
+                memcpy(responder->id, id_n->str.data, DHT_ID_LEN);
 
             /* Peers in values list */
             BencodeNode *values = bencode_dict_get(r, "values");

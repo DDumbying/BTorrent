@@ -24,7 +24,7 @@ btorrent
 .DS_Store
 
 # Test artifacts
-test_*
+/test_*
 *.log
 
 # Temporary files

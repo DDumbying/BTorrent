@@ -36,6 +36,9 @@ extern volatile sig_atomic_t g_interrupted;
 int cmd_download(const Config *cfg) {
     time_t session_start = time(NULL);
 
+    /* Ctrl+C makes tracker announces and their retry sleeps return early. */
+    tracker_set_abort_flag(&g_interrupted);
+
     /* 1. Parse torrent or magnet link */
     TorrentInfo *torrent = NULL;
 
@@ -90,7 +93,7 @@ int cmd_download(const Config *cfg) {
         DhtCtx *dht = dht_new(cfg->port);
         if (dht) {
             dht_bootstrap(dht);
-            PeerList dht_peers = dht_get_peers(dht, mag.info_hash, 30);
+            PeerList dht_peers = dht_get_peers(dht, mag.info_hash, 30, &g_interrupted);
             dht_free(dht);
             LOG_INFO("magnet: %d peers from DHT", dht_peers.count);
             if (dht_peers.count > 0) {
@@ -119,6 +122,10 @@ int cmd_download(const Config *cfg) {
             }
         }
 
+        if (g_interrupted) {
+            peer_list_free(&peers);
+            return EXIT_FAILURE;
+        }
         if (peers.count == 0) {
             LOG_ERROR("%s", "magnet: no peers found via DHT or trackers.\n"
                       "       The DHT may be unreachable on your network, or\n"
@@ -131,12 +138,15 @@ int cmd_download(const Config *cfg) {
         /* ── [3/5] BEP 9/10 metadata fetch ── */
         LOG_INFO("%s", "[3/5] Fetching torrent metadata via BEP 9/10 (ut_metadata)...");
         torrent = ext_fetch_metadata(&peers, mag.info_hash, 0, &g_interrupted);
+        /* The metadata peers are not reused below (the normal path announces
+         * again), so release them now rather than leaking them. */
+        peer_list_free(&peers);
+        if (!torrent && g_interrupted) return EXIT_FAILURE;
         if (!torrent) {
             LOG_ERROR("%s", "magnet: could not fetch torrent metadata from any peer.\n"
                       "       None of the discovered peers support the ut_metadata\n"
                       "       extension (BEP 9), or all connections timed out.\n"
                       "       Try: obtain the .torrent file directly and use -d file.torrent");
-            peer_list_free(&peers);
             return EXIT_FAILURE;
         }
 
@@ -199,15 +209,17 @@ magnet_resume:; /* semicolon: label must precede a statement, not a declaration 
     PeerList peers = tracker_announce_with_retry(
         torrent, peer_id, cfg->port,
         0, 0, torrent->total_length, "started");
-    if (peers.count == 0) {
+    if (peers.count == 0 && !g_interrupted) {
         LOG_WARN("%s", "No peers from tracker — trying DHT (30s)...");
         DhtCtx *dht = dht_new(cfg->port);
         if (dht) {
             dht_bootstrap(dht);
-            peers = dht_get_peers(dht, torrent->info_hash, 30);
+            peers = dht_get_peers(dht, torrent->info_hash, 30, &g_interrupted);
             dht_free(dht);
         }
-        if (peers.count == 0) {
+        /* A seeder doesn't need peers up front: it listens for incoming
+         * connections and the scheduler keeps re-announcing. */
+        if (peers.count == 0 && !g_interrupted && !cfg->seed) {
             LOG_ERROR("%s", "No peers found from tracker or DHT.\n"
                       "       Possible causes: firewall blocking UDP (DHT),\n"
                       "       tracker is down, or torrent has no active peers.\n"
@@ -222,9 +234,9 @@ magnet_resume:; /* semicolon: label must precede a statement, not a declaration 
 
     /* If the primary tracker returned very few peers, scrape backup trackers
      * right now to build a larger pool before starting the scheduler. */
-    if (peers.count < 50 && torrent->num_trackers > 0) {
+    if (peers.count < 50 && torrent->num_trackers > 0 && !g_interrupted) {
         LOG_INFO("%s", "      few peers — trying backup trackers...");
-        for (int i = 0; i < torrent->num_trackers; i++) {
+        for (int i = 0; i < torrent->num_trackers && !g_interrupted; i++) {
             const char *url = torrent->announce_list[i];
             if (url[0] == '\0' || strcmp(url, torrent->announce) == 0) continue;
             PeerList extra = tracker_announce_url(url, torrent, peer_id, cfg->port,
@@ -262,12 +274,12 @@ magnet_resume:; /* semicolon: label must precede a statement, not a declaration 
      * and the backup returns 0, so we'd stall on a single connection.
      * Use 30s timeout: DHT needs ~5 rounds × 2s each to converge, plus
      * resolution time for bootstrap nodes. */
-    if (peers.count < 20) {
+    if (peers.count < 20 && !g_interrupted) {
         LOG_INFO("      %d peers is too few — running DHT (30s)...", peers.count);
         DhtCtx *dht = dht_new((uint16_t)(cfg->port + 1));
         if (dht) {
             dht_bootstrap(dht);
-            PeerList dht_peers = dht_get_peers(dht, torrent->info_hash, 30);
+            PeerList dht_peers = dht_get_peers(dht, torrent->info_hash, 30, &g_interrupted);
             dht_free(dht);
             if (dht_peers.count > 0) {
                 /* Merge with dedup */
@@ -295,6 +307,12 @@ magnet_resume:; /* semicolon: label must precede a statement, not a declaration 
         }
     }
 
+    if (g_interrupted) {
+        peer_list_free(&peers);
+        torrent_free(torrent);
+        return EXIT_FAILURE;
+    }
+
     /* 4. Piece manager (auto-resumes from existing output) */
     LOG_INFO("[3/4] Piece manager → %s", out_path);
     PieceManager *pm = piece_manager_new(torrent, out_path);
@@ -304,7 +322,7 @@ magnet_resume:; /* semicolon: label must precede a statement, not a declaration 
         return EXIT_FAILURE;
     }
 
-    if (piece_manager_is_complete(pm)) {
+    if (piece_manager_is_complete(pm) && !cfg->seed) {
         LOG_INFO("%s", "All pieces already on disk — nothing to download.");
         piece_manager_free(pm);
         peer_list_free(&peers);
@@ -322,11 +340,16 @@ magnet_resume:; /* semicolon: label must precede a statement, not a declaration 
     time_t elapsed = time(NULL) - session_start;
 
     if (g_interrupted) {
-        LOG_INFO("%s", "Interrupted — sending stopped to tracker");
-        long dl = (long)pm->completed * torrent->piece_length;
+        LOG_INFO("%s", "Interrupted — sending stopped to tracker "
+                       "(Ctrl+C again to skip)");
+        /* Exact byte counts: completed * piece_length overcounts the short
+         * last piece and made "left" negative. */
+        long long have = pm->bytes_at_start + pm->bytes_downloaded;
+        long long left = torrent->total_length - have;
+        if (left < 0) left = 0;
         PeerList tmp = tracker_announce(torrent, peer_id, cfg->port,
-                                        dl, 0, torrent->total_length - dl,
-                                        "stopped");
+                                        (long)pm->bytes_downloaded, 0,
+                                        (long)left, "stopped");
         peer_list_free(&tmp);
     }
 
@@ -342,12 +365,16 @@ magnet_resume:; /* semicolon: label must precede a statement, not a declaration 
             LOG_INFO("  Avg    : %.1f KB/s",
                      (double)torrent->total_length / 1024.0 / (double)elapsed);
 
-        long dl = torrent->total_length;
-        PeerList tmp = tracker_announce(torrent, peer_id, cfg->port,
-                                        dl, 0, 0, "completed");
-        peer_list_free(&tmp);
+        /* After an interrupt the tracker already got "stopped"; a completed
+         * seeding session announced "completed" from the scheduler. */
+        if (!g_interrupted) {
+            long dl = torrent->total_length;
+            PeerList tmp = tracker_announce(torrent, peer_id, cfg->port,
+                                            dl, 0, 0, "completed");
+            peer_list_free(&tmp);
+        }
     } else {
-        long long written = (long long)pm->completed * torrent->piece_length;
+        long long written = pm->bytes_at_start + pm->bytes_downloaded;
         LOG_WARN("Incomplete: %d/%d pieces (%.1f MB written, %.1f MB remaining)",
                  pm->completed, pm->num_pieces,
                  (double)written / (1024.0 * 1024.0),
