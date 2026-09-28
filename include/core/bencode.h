@@ -22,7 +22,11 @@ struct BencodeNode {
     };
 };
 
-typedef struct { const uint8_t *data; size_t len; size_t pos; } BencodeParser;
+/* Maximum list/dict nesting. Real torrents and KRPC messages nest < 10
+ * levels; the cap stops hostile input from exhausting the stack. */
+#define BENCODE_MAX_DEPTH 64
+
+typedef struct { const uint8_t *data; size_t len; size_t pos; int depth; } BencodeParser;
 
 /** Parse a bencoded buffer. Returns root node or NULL on error. */
 BencodeNode *bencode_parse(const uint8_t *data, size_t len);

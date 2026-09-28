@@ -22,6 +22,7 @@
 #include <arpa/inet.h>
 
 #include "core/bencode.h"
+#include "proto/ext_handshake.h"
 #include "proto/tracker.h"   /* Peer, PeerList */
 #include "utils.h"
 #include "log.h"
@@ -85,17 +86,9 @@ static long long tb_consume(TokenBucket *tb, long long want) {
 #define META_LOCAL_ID 1
 #define PEX_LOCAL_ID  2
 
+/* Thin wrapper so the tests exercise the real builder, not a copy. */
 static int build_ext_handshake(uint8_t *buf, size_t cap) {
-    int n = snprintf((char *)buf, cap,
-        "d"
-            "1:m" "d"
-                "11:ut_metadata" "i%de"
-                "6:ut_pex"       "i%de"
-            "e"
-            "1:v" "14:btorrent/0.9.0"
-        "e",
-        META_LOCAL_ID, PEX_LOCAL_ID);
-    return (n > 0 && (size_t)n < cap) ? n : -1;
+    return ext_build_handshake(buf, cap, META_LOCAL_ID, PEX_LOCAL_ID, 0);
 }
 
 /* Build a PEX "added" payload from an explicit peer list. */

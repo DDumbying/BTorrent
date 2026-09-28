@@ -20,6 +20,7 @@
 #include <stdint.h>
 
 #include "core/bencode.h"
+#include "proto/ext_handshake.h"
 #include "core/sha1.h"
 #include "utils.h"
 #include "log.h"
@@ -38,17 +39,9 @@ static int g_pass = 0, g_fail = 0;
 
 #define UT_META_LOCAL_ID 1
 
+/* Thin wrapper so the tests exercise the real builder, not a copy. */
 static int build_ext_handshake(uint8_t *buf, size_t cap) {
-    int n = snprintf((char *)buf, cap,
-        "d"
-            "1:m"  "d"
-                "11:ut_metadata" "i%de"
-            "e"
-            "1:q" "i%de"
-            "1:v" "14:btorrent/0.9.0"
-        "e",
-        UT_META_LOCAL_ID, 1);
-    return (n > 0 && (size_t)n < cap) ? n : -1;
+    return ext_build_handshake(buf, cap, UT_META_LOCAL_ID, 0, 1);
 }
 
 static int build_meta_request(uint8_t *buf, size_t cap, int piece) {

@@ -34,14 +34,22 @@
 #include <signal.h>
 #include <unistd.h>
 #include <getopt.h>
+#include <curl/curl.h>
 
 #ifndef BT_VERSION
 #  define BT_VERSION "dev"
 #endif
 
 /* ── Signal flag — shared with cmd_download.c via extern ────────────────── */
+/* First Ctrl+C asks for a clean shutdown (flag checked by every blocking
+ * phase); a second one exits immediately, e.g. while the "stopped" announce
+ * is still waiting on an unresponsive tracker. */
 volatile sig_atomic_t g_interrupted = 0;
-static void sig_handler(int s) { (void)s; g_interrupted = 1; }
+static void sig_handler(int s) {
+    (void)s;
+    if (g_interrupted) _exit(130);   /* async-signal-safe */
+    g_interrupted = 1;
+}
 
 /* ── Usage ───────────────────────────────────────────────────────────────── */
 
@@ -71,7 +79,7 @@ static void print_usage(const char *prog) {
         "  -U, --ul <N>          Upload rate limit in KiB/s   (default: unlimited)\n"
         "  -D, --dl <N>          Download rate limit in KiB/s (default: unlimited)\n"
         "  -q, --quiet           Minimal output (progress bar only)\n"
-        "  -v, --verbose         Enable verbose logging\n"
+        "  -v, --verbose         Verbose logging (-vv for debug)\n"
         "  -l, --log <file>      Write verbose log to file\n"
         "  -j, --json            JSON output (inspect mode)\n"
         "  -h, --help            Show this help\n"
@@ -127,7 +135,7 @@ static int parse_args(int argc, char *argv[], Config *cfg) {
             case 'n': cfg->max_peers      = atoi(optarg);            break;
             case 't': cfg->peer_timeout_s = atoi(optarg);            break;
             case 'P': cfg->pipeline_depth = atoi(optarg);            break;
-            case 'v': cfg->verbose        = 1;                        break;
+            case 'v': if (cfg->verbose < 2) cfg->verbose++;           break;  /* -vv = debug */
             case 'q': cfg->verbose        = -1;                       break;
             case 'l': strncpy(cfg->log_path, optarg, 255);           break;
             case 'j': cfg->json_output    = 1;                        break;
@@ -205,6 +213,10 @@ int main(int argc, char *argv[]) {
     /* Ignore SIGPIPE — broken peer connections must not kill the process.
      * All sends use MSG_NOSIGNAL but belt-and-suspenders is safer. */
     signal(SIGPIPE, SIG_IGN);
+
+    /* libcurl's global init is not thread-safe, and tracker announces may run
+     * on a background thread, so do it once here before any threads exist. */
+    curl_global_init(CURL_GLOBAL_DEFAULT);
 
     /* Dispatch */
     int rc;

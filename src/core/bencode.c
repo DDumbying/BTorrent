@@ -140,12 +140,25 @@ static BencodeNode *parse_dict(BencodeParser *p) {
     return node;
 }
 
+static BencodeNode *parse_nested(BencodeParser *p,
+                                 BencodeNode *(*fn)(BencodeParser *)) {
+    if (p->depth >= BENCODE_MAX_DEPTH) {
+        LOG_WARN("bencode: nesting deeper than %d at pos %zu",
+                 BENCODE_MAX_DEPTH, p->pos);
+        return NULL;
+    }
+    p->depth++;
+    BencodeNode *node = fn(p);
+    p->depth--;
+    return node;
+}
+
 static BencodeNode *parse_value(BencodeParser *p) {
     int c = peek(p);
     if (c == -1) { LOG_WARN("%s", "bencode: unexpected end of data"); return NULL; }
     if (c == 'i') return parse_integer(p);
-    if (c == 'l') return parse_list(p);
-    if (c == 'd') return parse_dict(p);
+    if (c == 'l') return parse_nested(p, parse_list);
+    if (c == 'd') return parse_nested(p, parse_dict);
     if (isdigit(c)) return parse_string(p);
     LOG_WARN("bencode: unexpected character '%c' at pos %zu", (char)c, p->pos);
     return NULL;

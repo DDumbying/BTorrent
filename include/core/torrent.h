@@ -22,6 +22,7 @@
 #define MAX_TRACKERS    32
 #define MAX_FILES       512
 #define MAX_PATH_LEN    1024
+#define MAX_PIECE_LENGTH (256 * 1024 * 1024)  /* sanity cap: 256 MiB */
 
 /* ── File entry (for multi-file torrents) ────────────────────────────────── */
 

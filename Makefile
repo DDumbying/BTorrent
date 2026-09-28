@@ -33,6 +33,7 @@ SRCS = src/main.c             \
        src/core/magnet.c      \
        src/proto/peer.c       \
        src/proto/ext.c        \
+       src/proto/ext_handshake.c \
        src/proto/tracker.c    \
        src/dht/dht.c         \
        src/utils.c           \
@@ -125,13 +126,13 @@ test_magnet: build/obj
 
 test_ext: build/obj
 	$(CC) $(TEST_FLAGS) tests/unit/test_ext.c \
-	    src/core/bencode.c src/core/sha1.c \
+	    src/core/bencode.c src/core/sha1.c src/proto/ext_handshake.c \
 	    $(TEST_COMMON) -o build/test_ext
 	@echo "--- test_ext ---" && ./build/test_ext
 
 test_scheduler: build/obj
 	$(CC) $(TEST_FLAGS) tests/unit/test_scheduler.c \
-	    src/core/bencode.c src/core/sha1.c \
+	    src/core/bencode.c src/core/sha1.c src/proto/ext_handshake.c \
 	    $(TEST_COMMON) -o build/test_scheduler
 	@echo "--- test_scheduler ---" && ./build/test_scheduler
 
