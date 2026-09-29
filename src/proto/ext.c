@@ -541,7 +541,9 @@ static void *meta_fetch_worker(void *arg) {
     MetaFetchArgs *a = (MetaFetchArgs *)arg;
     for (int i = 0; i < a->count; i++) {
         if (atomic_load(a->done)) { break; }
-        if (a->interrupted && atomic_load(a->interrupted)) { break; }
+        /* A signal flag is volatile sig_atomic_t, not an _Atomic type, so
+         * it is read directly (atomic_load on it is rejected by clang). */
+        if (a->interrupted && *a->interrupted) { break; }
 
         const Peer *p = &a->peers[a->start + i];
         TorrentInfo *ti = try_peer_metadata(p->ip, p->port, a->info_hash,
