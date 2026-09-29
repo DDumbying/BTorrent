@@ -52,6 +52,15 @@ typedef struct {
      */
     uint8_t info_hash[20];
 
+    /* The info dict exactly as bencoded (its SHA-1 is info_hash). Kept so we
+     * can serve it to magnet-link peers (BEP 9). Heap-allocated. */
+    uint8_t *info_raw;
+    size_t   info_raw_len;
+
+    /* BEP 27: private torrents must only use their trackers — no DHT, no
+     * PEX, and no sharing the metadata with peers. */
+    int     is_private;
+
     /* Piece information */
     int     piece_length;       /* bytes per piece (power of 2, e.g. 262144) */
     int     num_pieces;         /* total number of pieces */

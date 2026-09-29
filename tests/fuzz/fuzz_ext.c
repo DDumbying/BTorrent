@@ -16,6 +16,17 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
     /* What the scheduler parses from peers' BEP 10 / BEP 11 messages. */
     int pex_id = ext_parse_pex_id(data, size);
     if (pex_id != -1 && (pex_id < 1 || pex_id > 255)) __builtin_trap();
+    int meta_id = ext_parse_metadata_id(data, size);
+    if (meta_id != -1 && (meta_id < 1 || meta_id > 255)) __builtin_trap();
+
+    /* A ut_metadata request as the scheduler serves it. */
+    int piece = meta_parse_request(data, size);
+    if (piece < -1) __builtin_trap();
+    static uint8_t reply[META_BLOCK_SIZE + 128];
+    if (piece >= 0 &&
+        meta_build_response(reply, sizeof(reply), piece, data, size) < 0)
+        __builtin_trap();
+
     Peer peers[50];
     int n = pex_parse_added(data, size, peers, 50);
     if (n < 0 || n > 50) __builtin_trap();

@@ -12,6 +12,8 @@
  *
  * PEX (BEP 11) — peers exchange peer lists via the ut_pex extension message.
  * Inbound PEX data is parsed and injected into the peer pool automatically.
+ * Metadata (BEP 9) — magnet-link peers can fetch the info dict from us via
+ * ut_metadata. Private torrents (BEP 27) do neither PEX nor metadata.
  *
  * Rate limiting — token-bucket per direction (upload / download).
  * Tokens refill at the configured KiB/s rate on each epoll tick.
@@ -214,6 +216,7 @@ typedef struct {
 
     /* BEP-10 ext IDs as advertised by the remote peer */
     int        peer_pex_id;   /* their ut_pex ext msg id (-1 = unsupported) */
+    int        peer_meta_id;  /* their ut_metadata ext msg id (-1 = unsupported) */
 
     uint8_t   *peer_bitfield;
     int        bf_len;
@@ -361,10 +364,16 @@ static int send_ext_msg(int sock, uint8_t sub_id,
     return nb_send(sock, payload, payload_len);
 }
 
-static int send_ext_handshake(int sock) {
+/* Private torrents (BEP 27) advertise neither PEX nor the metadata: peers
+ * of a private swarm must come from its trackers only. */
+static int send_ext_handshake(int sock, const TorrentInfo *torrent) {
     uint8_t body[256];
+    int priv = torrent->is_private;
     int blen = ext_build_handshake(body, sizeof(body),
-                                   META_LOCAL_ID, PEX_LOCAL_ID, PENDING_MAX);
+                                   priv ? 0 : META_LOCAL_ID,
+                                   priv ? 0 : PEX_LOCAL_ID,
+                                   priv ? 0 : torrent->info_raw_len,
+                                   PENDING_MAX);
     if (blen < 0) return 0;
     return send_ext_msg(sock, 0 /* handshake */, body, (size_t)blen);
 }
@@ -405,6 +414,27 @@ static int send_pex(Session *s, Session *all, int max_s, int self_idx) {
     int blen = build_pex_body(body, sizeof(body), all, max_s, self_idx);
     if (blen <= 0) return 0;
     return send_ext_msg(s->sock, (uint8_t)s->peer_pex_id, body, (size_t)blen);
+}
+
+/* ── BEP 9: serve the info dict to magnet-link peers ────────────────────── */
+
+static int serve_metadata(Session *s, const TorrentInfo *torrent,
+                          const uint8_t *msg, size_t len) {
+    int piece = meta_parse_request(msg, len);
+    if (piece < 0 || s->peer_meta_id <= 0) return 0;
+    /* We never advertise ut_metadata for a private torrent, but a peer may
+     * ask anyway: refuse rather than leak the info dict. */
+    const uint8_t *info = torrent->is_private ? NULL : torrent->info_raw;
+    uint8_t *body = xmalloc(META_BLOCK_SIZE + 128);
+    int blen = meta_build_response(body, META_BLOCK_SIZE + 128, piece,
+                                   info, torrent->info_raw_len);
+    int rc = blen < 0 ? 0 :
+             send_ext_msg(s->sock, (uint8_t)s->peer_meta_id, body, (size_t)blen);
+    free(body);
+    if (rc == 0)
+        LOG_DEBUG("peer %s:%d: metadata piece %d %s", s->ip, s->port, piece,
+                  info ? "sent" : "rejected");
+    return rc;
 }
 
 /* Merge new peers into the pool, deduplicating by IP:port. */
@@ -537,6 +567,7 @@ static void session_init(Session *s, int sock, const char *ip, uint16_t port,
     s->am_choked     = 1;
     s->peer_choked   = 1;
     s->peer_pex_id   = -1;
+    s->peer_meta_id  = -1;
     s->last_active   = time(NULL);
     s->last_keepalive= time(NULL);
     s->last_pex      = time(NULL);
@@ -831,9 +862,15 @@ static void dispatch_msg(Session *s, int sidx,
 
         if (sub == 0) {
             /* Extension handshake */
-            s->peer_pex_id = ext_parse_pex_id(payload + 1, plen - 1);
-            LOG_DEBUG("peer %s:%d: ext hs, pex_id=%d", s->ip, s->port, s->peer_pex_id);
-        } else if (sub == PEX_LOCAL_ID) {
+            s->peer_pex_id  = torrent->is_private ? -1
+                            : ext_parse_pex_id(payload + 1, plen - 1);
+            s->peer_meta_id = ext_parse_metadata_id(payload + 1, plen - 1);
+            LOG_DEBUG("peer %s:%d: ext hs, pex_id=%d meta_id=%d", s->ip, s->port,
+                      s->peer_pex_id, s->peer_meta_id);
+        } else if (sub == META_LOCAL_ID) {
+            if (serve_metadata(s, torrent, payload + 1, plen - 1) < 0)
+                s->phase = PS_DEAD;
+        } else if (sub == PEX_LOCAL_ID && !torrent->is_private) {
             /* ut_pex data */
             Peer new_peers[50] = {0};
             int n = pex_parse_added(payload + 1, plen - 1, new_peers, 50);
@@ -844,7 +881,6 @@ static void dispatch_msg(Session *s, int sidx,
                              s->ip, s->port, added, peers->count);
             }
         }
-        /* sub == META_LOCAL_ID handled in ext.c / metadata-fetch phase */
         break;
     }
 
@@ -920,7 +956,7 @@ static void handle_session(Session *s, uint32_t ev_flags,
             free(bfmsg);
             if (rc < 0) DROP();
         }
-        if (supports_ext && send_ext_handshake(s->sock) < 0) DROP();
+        if (supports_ext && send_ext_handshake(s->sock, torrent) < 0) DROP();
         if (send_simple(s->sock, MSG_INTERESTED) < 0) DROP();
         s->am_choked = 1;
         s->phase     = PS_INTERESTED;
@@ -954,7 +990,7 @@ static void handle_session(Session *s, uint32_t ev_flags,
         free(bfmsg);
         if (rc < 0) DROP();
 
-        if (supports_ext && send_ext_handshake(s->sock) < 0) DROP();
+        if (supports_ext && send_ext_handshake(s->sock, torrent) < 0) DROP();
 
         /* Unchoke immediately — simple altruistic seeding policy */
         s->peer_choked = 0;
@@ -1094,7 +1130,7 @@ static int open_connection(Session *sessions, int max_s,
 typedef struct {
     atomic_int   refs;          /* main loop + worker */
     atomic_int   done;          /* set by the worker after `result` is written */
-    TorrentInfo  torrent;       /* copy; pieces_hash cleared (not needed) */
+    TorrentInfo  torrent;       /* copy; heap pointers cleared (not owned) */
     uint8_t      peer_id[20];
     uint16_t     port;
     long         dl, ul, left;
@@ -1125,7 +1161,8 @@ static AnnounceJob *announce_start(const TorrentInfo *torrent,
                                    const char *event) {
     AnnounceJob *job = xcalloc(1, sizeof(*job));
     job->torrent = *torrent;
-    job->torrent.pieces_hash = NULL;
+    job->torrent.pieces_hash = NULL;   /* not needed, and owned by the caller */
+    job->torrent.info_raw    = NULL;
     memcpy(job->peer_id, peer_id, 20);
     job->port = port;
     job->dl = dl; job->ul = ul; job->left = left;
@@ -1348,7 +1385,7 @@ int scheduler_run(const TorrentInfo *torrent,
         }
 
         /* PEX broadcast every 60 s */
-        if (time(NULL) - last_pex_bcast >= 60) {
+        if (!torrent->is_private && time(NULL) - last_pex_bcast >= 60) {
             last_pex_bcast = time(NULL);
             for (int i = 0; i < max_s; i++) {
                 Session *s = &sessions[i];

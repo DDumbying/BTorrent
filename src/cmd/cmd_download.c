@@ -209,9 +209,15 @@ magnet_resume:; /* semicolon: label must precede a statement, not a declaration 
     PeerList peers = tracker_announce_with_retry(
         torrent, peer_id, cfg->port,
         0, 0, torrent->total_length, "started");
+    /* BEP 27: a private torrent's peers come from its trackers only. */
+    if (torrent->is_private)
+        LOG_INFO("%s", "      private torrent — DHT and PEX disabled");
     if (peers.count == 0 && !g_interrupted) {
-        LOG_WARN("%s", "No peers from tracker — trying DHT (30s)...");
-        DhtCtx *dht = dht_new(cfg->port);
+        DhtCtx *dht = NULL;
+        if (!torrent->is_private) {
+            LOG_WARN("%s", "No peers from tracker — trying DHT (30s)...");
+            dht = dht_new(cfg->port);
+        }
         if (dht) {
             dht_bootstrap(dht);
             peers = dht_get_peers(dht, torrent->info_hash, 30, &g_interrupted);
@@ -227,7 +233,8 @@ magnet_resume:; /* semicolon: label must precede a statement, not a declaration 
             torrent_free(torrent);
             return EXIT_FAILURE;
         }
-        LOG_INFO("dht: %d peers found", peers.count);
+        if (!torrent->is_private)
+            LOG_INFO("dht: %d peers found", peers.count);
     }
     LOG_INFO("      %d peers (re-announce in %ds)",
              peers.count, peers.interval);
@@ -274,7 +281,7 @@ magnet_resume:; /* semicolon: label must precede a statement, not a declaration 
      * and the backup returns 0, so we'd stall on a single connection.
      * Use 30s timeout: DHT needs ~5 rounds × 2s each to converge, plus
      * resolution time for bootstrap nodes. */
-    if (peers.count < 20 && !g_interrupted) {
+    if (peers.count < 20 && !g_interrupted && !torrent->is_private) {
         LOG_INFO("      %d peers is too few — running DHT (30s)...", peers.count);
         DhtCtx *dht = dht_new((uint16_t)(cfg->port + 1));
         if (dht) {

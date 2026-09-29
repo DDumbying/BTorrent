@@ -62,7 +62,7 @@ static uint8_t *read_file(const char *path, size_t *out_len) {
  * — which rejected valid torrents or could hash the wrong bytes.)
  */
 static int compute_info_hash(const uint8_t *raw, size_t raw_len,
-                              uint8_t *info_hash) {
+                              TorrentInfo *t) {
     if (raw_len < 2 || raw[0] != 'd') return -1;
     size_t pos = 1;
     while (pos < raw_len && raw[pos] != 'e') {
@@ -76,7 +76,10 @@ static int compute_info_hash(const uint8_t *raw, size_t raw_len,
         int is_info = key->str.len == 4 && memcmp(key->str.data, "info", 4) == 0;
         bencode_free(key);
         if (is_info) {
-            sha1(raw + pos, vlen, info_hash);
+            sha1(raw + pos, vlen, t->info_hash);
+            t->info_raw = xmalloc(vlen);
+            memcpy(t->info_raw, raw + pos, vlen);
+            t->info_raw_len = vlen;
             return 0;
         }
         pos += vlen;
@@ -172,6 +175,9 @@ TorrentInfo *torrent_parse_buffer(const uint8_t *raw, size_t raw_len) {
         goto fail;
     }
     memcpy(t->name, name->str.data, name->str.len);
+
+    BencodeNode *priv = bencode_dict_get(info, "private");
+    t->is_private = priv && priv->type == BENCODE_INT && priv->integer == 1;
 
     BencodeNode *pl = bencode_dict_get(info, "piece length");
     if (!pl || pl->type != BENCODE_INT ||
@@ -270,7 +276,7 @@ TorrentInfo *torrent_parse_buffer(const uint8_t *raw, size_t raw_len) {
         goto fail;
     }
 
-    if (compute_info_hash(raw, raw_len, t->info_hash) < 0) goto fail;
+    if (compute_info_hash(raw, raw_len, t) < 0) goto fail;
 
     bencode_free(root);
     return t;
@@ -284,6 +290,7 @@ fail:
 void torrent_free(TorrentInfo *t) {
     if (!t) return;
     free(t->pieces_hash);
+    free(t->info_raw);
     free(t);
 }
 
@@ -301,6 +308,7 @@ void torrent_print(const TorrentInfo *t) {
     LOG_INFO("Piece length: %d bytes", t->piece_length);
     LOG_INFO("Pieces:       %d", t->num_pieces);
     LOG_INFO("Multi-file:   %s", t->is_multi_file ? "yes" : "no");
+    LOG_INFO("Private:      %s", t->is_private ? "yes" : "no");
     for (int i = 0; i < t->num_trackers && i < 5; i++)
         LOG_DEBUG("Tracker[%d]: %s", i, t->announce_list[i]);
     if (t->is_multi_file) {

@@ -161,6 +161,14 @@ test_scheduler: | build
 	    $(TEST_COMMON) -o build/test_scheduler
 	@echo "--- test_scheduler ---" && ./build/test_scheduler
 
+test_metadata: | build
+	$(CC) $(TEST_FLAGS) $(CURL_CFLAGS) tests/unit/test_metadata_serve.c \
+	    src/core/pieces.c src/core/torrent.c src/core/bencode.c \
+	    src/core/sha1.c src/proto/peer.c src/proto/tracker.c \
+	    src/proto/ext_handshake.c src/net/tcp.c \
+	    $(TEST_COMMON) $(LIBS) -o build/test_metadata
+	@echo "--- test_metadata ---" && ./build/test_metadata
+
 test_publish: | build
 	$(CC) $(TEST_FLAGS) -DBT_VERSION=\"$(VERSION)\" tests/unit/test_publish.c \
 	    src/core/pieces.c src/core/sha1.c src/core/torrent.c \
@@ -184,7 +192,7 @@ test_tracker_v6: | build
 	    $(TEST_COMMON) $(LIBS) -o build/test_tracker_v6
 	@echo "--- test_tracker_v6 ---" && ./build/test_tracker_v6
 
-test: test_sha1 test_peer test_pieces test_magnet test_ext test_scheduler test_publish test_circuit test_netio test_tracker_v6
+test: test_sha1 test_peer test_pieces test_magnet test_ext test_scheduler test_metadata test_publish test_circuit test_netio test_tracker_v6
 
 ## ── Fuzzing ───────────────────────────────────────────────────────────────
 ##   make fuzz                     build libFuzzer targets (needs clang)
@@ -251,6 +259,6 @@ distclean: clean
 	rm -f $(TARNAME).tar.gz
 
 .PHONY: all debug install uninstall dist \
-        test test_sha1 test_peer test_pieces test_magnet test_ext test_scheduler test_publish \
+        test test_sha1 test_peer test_pieces test_magnet test_ext test_scheduler test_metadata test_publish \
         test_circuit test_netio test_tracker_v6 fuzz fuzz-run fuzz-replay FORCE \
         clean distclean
