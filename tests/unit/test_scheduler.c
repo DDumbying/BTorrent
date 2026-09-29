@@ -88,7 +88,7 @@ static long long tb_consume(TokenBucket *tb, long long want) {
 
 /* Thin wrapper so the tests exercise the real builder, not a copy. */
 static int build_ext_handshake(uint8_t *buf, size_t cap) {
-    return ext_build_handshake(buf, cap, META_LOCAL_ID, PEX_LOCAL_ID, 0);
+    return ext_build_handshake(buf, cap, META_LOCAL_ID, PEX_LOCAL_ID, 0, 0);
 }
 
 /* Build a PEX "added" payload from an explicit peer list. */

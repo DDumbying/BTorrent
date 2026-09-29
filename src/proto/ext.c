@@ -58,7 +58,6 @@
 #define PSTRLEN           19
 #define EXT_MSGID         20            /* BEP-10: extension messages use id 20 */
 #define UT_META_LOCAL_ID  1             /* our local ext msg id for ut_metadata  */
-#define META_BLOCK_SIZE   (16 * 1024)   /* BEP 9: 16 KiB per metadata block     */
 #define MAX_METADATA_SIZE (10 * 1024 * 1024) /* 10 MiB — sanity cap             */
 #define PEER_TIMEOUT_S    8     /* reduced from 15 — fail fast, try next peer */
 
@@ -371,7 +370,7 @@ static TorrentInfo *try_peer_metadata(const char    *ip,
     /* ── Step 2: send our BEP-10 extension handshake ── */
     uint8_t ext_hs_body[256];
     int ext_hs_len = ext_build_handshake(ext_hs_body, sizeof(ext_hs_body),
-                                         UT_META_LOCAL_ID, 0, 1);
+                                         UT_META_LOCAL_ID, 0, 0, 1);
     if (ext_hs_len < 0 ||
         send_wire_msg(sock, EXT_MSGID, ext_hs_body, (uint32_t)ext_hs_len) < 0) {
         LOG_DEBUG("ext: %s:%d failed to send ext handshake", ip, port);

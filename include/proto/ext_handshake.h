@@ -13,12 +13,14 @@
  *
  * @ut_metadata_id  our local id for ut_metadata (<= 0 to omit)
  * @ut_pex_id       our local id for ut_pex      (<= 0 to omit)
+ * @metadata_size   size of the info dict we can serve (0 to omit; BEP 9)
  * @reqq            request queue depth hint     (<= 0 to omit)
  *
  * Returns bytes written (no NUL counted), or -1 if cap is too small.
  */
 int ext_build_handshake(uint8_t *buf, size_t cap,
-                        int ut_metadata_id, int ut_pex_id, int reqq);
+                        int ut_metadata_id, int ut_pex_id,
+                        size_t metadata_size, int reqq);
 
 /**
  * ext_parse_pex_id — the peer's ut_pex message id from its BEP 10 handshake
@@ -27,9 +29,31 @@ int ext_build_handshake(uint8_t *buf, size_t cap,
  */
 int ext_parse_pex_id(const uint8_t *data, size_t len);
 
+/** ext_parse_metadata_id — likewise for the peer's ut_metadata id (BEP 9). */
+int ext_parse_metadata_id(const uint8_t *data, size_t len);
+
 /**
  * pex_parse_added — IPv4 peers from the "added" field of a ut_pex message
  * (BEP 11). Fills up to max_out entries of out, skipping port 0; returns
  * how many were filled. Malformed data yields 0.
  */
 int pex_parse_added(const uint8_t *data, size_t len, Peer *out, int max_out);
+
+/* BEP 9 transfers the info dict in 16 KiB pieces (the last may be shorter). */
+#define META_BLOCK_SIZE 16384
+
+/**
+ * meta_parse_request — the piece index from a ut_metadata request
+ * (msg_type 0), or -1 if the message is anything else or malformed.
+ */
+int meta_parse_request(const uint8_t *data, size_t len);
+
+/**
+ * meta_build_response — our reply to a request for metadata piece `piece`:
+ * a data message (dict + raw block) when info is non-NULL and the piece
+ * exists, otherwise a reject. Pass info = NULL to refuse unconditionally
+ * (e.g. for private torrents, BEP 27). cap must hold META_BLOCK_SIZE + 64.
+ * Returns bytes written, or -1 if cap is too small.
+ */
+int meta_build_response(uint8_t *buf, size_t cap, int piece,
+                        const uint8_t *info, size_t info_len);

@@ -9,6 +9,8 @@
  *   3. Metadata-request bencode builder
  *   4. Metadata-data message parser (msg_type, piece, total_size, block ptr)
  *   5. SHA-1 verification path in torrent_info_from_raw_dict (bad hash rejection)
+ *   6. Serving metadata (BEP 9): metadata_size, request parser, data/reject
+ *      replies, and the peer's ut_metadata id
  *
  * Network-dependent code (tcp_connect_timed, try_peer_metadata,
  * ext_fetch_metadata) is tested by integration rather than unit tests.
@@ -41,7 +43,7 @@ static int g_pass = 0, g_fail = 0;
 
 /* Thin wrapper so the tests exercise the real builder, not a copy. */
 static int build_ext_handshake(uint8_t *buf, size_t cap) {
-    return ext_build_handshake(buf, cap, UT_META_LOCAL_ID, 0, 1);
+    return ext_build_handshake(buf, cap, UT_META_LOCAL_ID, 0, 0, 1);
 }
 
 static int build_meta_request(uint8_t *buf, size_t cap, int piece) {
@@ -300,6 +302,120 @@ static void test_sha1_verify(void) {
 
 /* ── main ─────────────────────────────────────────────────────────────────── */
 
+/* ── Serving metadata (BEP 9) ─────────────────────────────────────────────── */
+
+static void test_handshake_metadata_size(void) {
+    printf("\n--- ext handshake metadata_size ---\n");
+
+    uint8_t buf[256];
+    int len = ext_build_handshake(buf, sizeof(buf), 1, 2, 40000, 128);
+    BencodeNode *root = len > 0 ? bencode_parse(buf, (size_t)len) : NULL;
+    EXPECT(root != NULL, "handshake with metadata_size is valid bencode");
+    BencodeNode *ms = bencode_dict_get(root, "metadata_size");
+    EXPECT(ms && ms->type == BENCODE_INT && ms->integer == 40000,
+           "metadata_size advertised");
+    bencode_free(root);
+
+    /* Private torrent: no ids and no size — an empty 'm' dict. */
+    len = ext_build_handshake(buf, sizeof(buf), 0, 0, 0, 128);
+    root = len > 0 ? bencode_parse(buf, (size_t)len) : NULL;
+    BencodeNode *m = bencode_dict_get(root, "m");
+    EXPECT(m && m->type == BENCODE_DICT && m->dict.count == 0,
+           "private handshake: empty 'm'");
+    EXPECT(bencode_dict_get(root, "metadata_size") == NULL,
+           "private handshake: no metadata_size");
+    bencode_free(root);
+}
+
+static void test_parse_metadata_id(void) {
+    printf("\n--- peer ut_metadata id ---\n");
+
+    const char *hs = "d1:md11:ut_metadatai3e6:ut_pexi7eee";
+    EXPECT(ext_parse_metadata_id((const uint8_t *)hs, strlen(hs)) == 3,
+           "ut_metadata id parsed");
+    EXPECT(ext_parse_pex_id((const uint8_t *)hs, strlen(hs)) == 7,
+           "ut_pex id still parsed");
+
+    const char *none = "d1:md6:ut_pexi7eee";
+    EXPECT(ext_parse_metadata_id((const uint8_t *)none, strlen(none)) == -1,
+           "missing ut_metadata → -1");
+    const char *zero = "d1:md11:ut_metadatai0eee";   /* 0 = disabled (BEP 10) */
+    EXPECT(ext_parse_metadata_id((const uint8_t *)zero, strlen(zero)) == -1,
+           "ut_metadata 0 → -1");
+    const char *big = "d1:md11:ut_metadatai256eee";
+    EXPECT(ext_parse_metadata_id((const uint8_t *)big, strlen(big)) == -1,
+           "ut_metadata > 255 → -1");
+}
+
+static void test_meta_parse_request(void) {
+    printf("\n--- metadata request parser ---\n");
+
+    uint8_t buf[64];
+    int n = build_meta_request(buf, sizeof(buf), 2);
+    EXPECT(meta_parse_request(buf, (size_t)n) == 2, "request piece 2");
+
+    const char *data = "d8:msg_typei1e5:piecei0e10:total_sizei3eeabc";
+    EXPECT(meta_parse_request((const uint8_t *)data, strlen(data)) == -1,
+           "data message is not a request");
+    const char *reject = "d8:msg_typei2e5:piecei0ee";
+    EXPECT(meta_parse_request((const uint8_t *)reject, strlen(reject)) == -1,
+           "reject is not a request");
+    const char *neg = "d8:msg_typei0e5:piecei-1ee";
+    EXPECT(meta_parse_request((const uint8_t *)neg, strlen(neg)) == -1,
+           "negative piece → -1");
+    const char *huge = "d8:msg_typei0e5:piecei99999999999ee";
+    EXPECT(meta_parse_request((const uint8_t *)huge, strlen(huge)) == -1,
+           "piece beyond INT_MAX → -1");
+    const char *nopiece = "d8:msg_typei0ee";
+    EXPECT(meta_parse_request((const uint8_t *)nopiece, strlen(nopiece)) == -1,
+           "missing piece → -1");
+    EXPECT(meta_parse_request((const uint8_t *)"garbage", 7) == -1,
+           "garbage → -1");
+}
+
+static void test_meta_build_response(void) {
+    printf("\n--- metadata response builder ---\n");
+
+    /* An info dict of 1.5 blocks: piece 0 full, piece 1 half. */
+    size_t info_len = META_BLOCK_SIZE + META_BLOCK_SIZE / 2;
+    uint8_t *info = malloc(info_len);
+    for (size_t i = 0; i < info_len; i++) info[i] = (uint8_t)(i * 7);
+
+    size_t cap = META_BLOCK_SIZE + 64;
+    uint8_t *buf = malloc(cap);
+    MetaMsg mm;
+
+    int n = meta_build_response(buf, cap, 0, info, info_len);
+    EXPECT(n > 0 && parse_meta_msg(buf, (uint32_t)n, &mm) == 0, "piece 0 parses");
+    EXPECT(mm.msg_type == 1 && mm.piece == 0, "piece 0: data message");
+    EXPECT(mm.total_size == (int)info_len, "piece 0: total_size");
+    EXPECT(mm.block_len == META_BLOCK_SIZE &&
+           memcmp(mm.block, info, META_BLOCK_SIZE) == 0, "piece 0: full block");
+
+    n = meta_build_response(buf, cap, 1, info, info_len);
+    EXPECT(n > 0 && parse_meta_msg(buf, (uint32_t)n, &mm) == 0, "piece 1 parses");
+    EXPECT(mm.msg_type == 1 && mm.piece == 1, "piece 1: data message");
+    EXPECT(mm.block_len == META_BLOCK_SIZE / 2 &&
+           memcmp(mm.block, info + META_BLOCK_SIZE, META_BLOCK_SIZE / 2) == 0,
+           "piece 1: short last block");
+
+    n = meta_build_response(buf, cap, 2, info, info_len);
+    EXPECT(n > 0 && parse_meta_msg(buf, (uint32_t)n, &mm) == 0 &&
+           mm.msg_type == 2 && mm.piece == 2 && mm.block == NULL,
+           "out-of-range piece → reject");
+
+    n = meta_build_response(buf, cap, 0, NULL, info_len);
+    EXPECT(n > 0 && parse_meta_msg(buf, (uint32_t)n, &mm) == 0 &&
+           mm.msg_type == 2 && mm.block == NULL,
+           "no info (private) → reject");
+
+    EXPECT(meta_build_response(buf, 100, 0, info, info_len) == -1,
+           "too-small buffer → -1");
+
+    free(buf);
+    free(info);
+}
+
 int main(void) {
     printf("=== BEP 9/10 Extension Protocol Tests ===\n");
 
@@ -308,6 +424,10 @@ int main(void) {
     test_meta_request_builder();
     test_meta_data_parser();
     test_sha1_verify();
+    test_handshake_metadata_size();
+    test_parse_metadata_id();
+    test_meta_parse_request();
+    test_meta_build_response();
 
     printf("\n%d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;

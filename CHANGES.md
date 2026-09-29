@@ -1,5 +1,25 @@
 # btorrent — Changelog
 
+## Unreleased
+
+### New features
+
+- **Private torrents (BEP 27)** — torrents with `private=1` in the info dict
+  get their peers from their trackers only: no DHT lookups, no PEX (sent or
+  accepted), and the info dict is never shared with peers. `inspect` shows
+  the flag (`"private"` in `--json` output).
+
+- **Serving metadata (BEP 9)** — peers that joined via a magnet link can now
+  fetch the info dict from us over `ut_metadata`. Our extension handshake
+  advertises `metadata_size`, requests are answered 16 KiB at a time, and
+  out-of-range pieces are rejected.
+
+### Tests
+
+- New `test_metadata` suite drives real scheduler sessions over a socketpair
+  (handshake contents, data/reject replies, PEX for private torrents).
+- `fuzz_ext` also covers the ut_metadata request parser and reply builder.
+
 ## v1.1.0 (2026-04-16)
 
 Feature release focusing on IPv6 support and UDP tracker optimization.

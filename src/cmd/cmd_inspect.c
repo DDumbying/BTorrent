@@ -39,6 +39,7 @@ static void print_human(const TorrentInfo *t) {
            t->piece_length, t->piece_length / 1024);
     printf("  Pieces      : %d\n", t->num_pieces);
     printf("  Files       : %d\n", t->num_files);
+    printf("  Private     : %s\n", t->is_private ? "yes (tracker only: no DHT/PEX)" : "no");
 
     if (t->comment[0])
         printf("  Comment     : %s\n", t->comment);
@@ -93,6 +94,7 @@ static void print_json(const TorrentInfo *t) {
     printf("  \"num_pieces\": %d,\n",   t->num_pieces);
     printf("  \"num_files\": %d,\n",    t->num_files);
     printf("  \"multi_file\": %s,\n",   t->is_multi_file ? "true" : "false");
+    printf("  \"private\": %s,\n",      t->is_private ? "true" : "false");
 
     if (t->comment[0]) {
         printf("  \"comment\": ");  json_str(stdout, t->comment);   printf(",\n");

@@ -25,6 +25,8 @@ The goal is not just to download files, but to understand how decentralized netw
 | DHT peer discovery | Done | BEP 5 |
 | Magnet links | Done | BEP 9/10 |
 | Peer Exchange (PEX) | Done | BEP 11 |
+| Private torrents | Done | BEP 27 |
+| Serving metadata to magnet peers | Done | BEP 9 |
 | Seeding mode | Done | - |
 | Rate limiting | Done | - |
 | File locking | Done | - |
