@@ -2,46 +2,88 @@ name: CI
 
 on:
   push:
-    branches: [main, master]
+    branches: [main]
   pull_request:
-    branches: [main, master]
+    branches: [main]
+
+permissions:
+  contents: read
 
 jobs:
   build:
+    name: build (${{ matrix.os }}, ${{ matrix.compiler }})
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, ubuntu-24.04]
+        os: [ubuntu-22.04, ubuntu-24.04]
         compiler: [gcc, clang]
-
     runs-on: ${{ matrix.os }}
-
+    env:
+      CC: ${{ matrix.compiler }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install dependencies (gcc)
-        if: matrix.compiler == 'gcc'
+      - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc make pkg-config libcurl4-openssl-dev git
+          sudo apt-get install -y ${{ matrix.compiler }} make pkg-config libcurl4-openssl-dev
 
-      - name: Install dependencies (clang)
-        if: matrix.compiler == 'clang'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y clang make pkg-config libcurl4-openssl-dev git
+      - name: Build (warnings are errors)
+        run: make -j"$(nproc)" WERROR=1
 
-      - name: Set compiler
-        run: echo "CC=${{ matrix.compiler }}" >> $GITHUB_ENV
+      - name: Unit tests
+        run: make test WERROR=1
 
-      - name: Build
-        run: make clean && make -j$(nproc)
-
-      - name: Run tests
-        run: make test
-
-      - name: Check version
+      - name: Smoke test
         run: ./build/btorrent -V
 
-      - name: Binary info
-        run: file build/btorrent && ls -lh build/btorrent
+  sanitizers:
+    name: sanitizers (ASan + UBSan)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc make pkg-config libcurl4-openssl-dev
+
+      - name: Debug build
+        run: make -j"$(nproc)" debug WERROR=1
+
+      - name: Unit tests under ASan + UBSan
+        run: make test SANITIZE=1 WERROR=1
+
+      - name: Smoke test
+        run: ./build/btorrent-debug -V
+
+  deb:
+    name: Debian package
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential debhelper devscripts \
+            libcurl4-openssl-dev pkg-config lintian
+
+      - name: Source tarball
+        run: make dist
+
+      - name: Build .deb
+        run: pkg/debian/build-deb.sh btorrent-*.tar.gz dist
+
+      - name: Lintian
+        run: lintian --fail-on error dist/*.deb
+
+      - name: Install and run
+        run: |
+          sudo apt-get install -y ./dist/*.deb
+          btorrent -V
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deb
+          path: dist/*.deb

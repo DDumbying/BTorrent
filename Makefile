@@ -1,8 +1,16 @@
 ## btorrent Makefile
-## Targets: all  debug  test  install  uninstall  dist  clean
+## Targets: all  debug  test  install  uninstall  dist  clean  distclean
 ##
 ## Requirements: gcc (or clang), libcurl, pkg-config
 ## Platform: Linux only (epoll-based scheduler)
+##
+## Options (make VAR=value):
+##   CFLAGS / CPPFLAGS / LDFLAGS  appended to ours, so distro build flags
+##                                (dpkg-buildflags, makepkg, rpm) apply
+##   HARDEN=0    drop our default hardening flags (use when the distro's
+##               CFLAGS already provide them, to avoid duplicate defines)
+##   WERROR=1    treat warnings as errors (CI)
+##   SANITIZE=1  build the unit tests with ASan + UBSan (CI)
 
 ## ── Version (single source of truth) ──────────────────────────────────────
 VERSION  = 1.1.0
@@ -15,9 +23,20 @@ WARN     = -Wall -Wextra -Wpedantic -Wshadow
 IFLAGS   = -Iinclude
 PREFIX  ?= /usr/local
 
+ifeq ($(WERROR),1)
+WARN    += -Werror
+endif
+
+HARDEN  ?= 1
+ifeq ($(HARDEN),1)
+HARDEN_CFLAGS  = -fstack-protector-strong -D_FORTIFY_SOURCE=2
+HARDEN_LDFLAGS = -Wl,-z,relro,-z,now
+endif
+
 ## ── pkg-config for libcurl (falls back to bare -lcurl if unavailable) ─────
 CURL_CFLAGS := $(shell pkg-config --cflags libcurl 2>/dev/null)
 CURL_LIBS   := $(shell pkg-config --libs   libcurl 2>/dev/null || echo -lcurl)
+LIBS         = $(CURL_LIBS) -lpthread
 
 ## ── Sources ───────────────────────────────────────────────────────────────
 SRCS = src/main.c             \
@@ -41,37 +60,41 @@ SRCS = src/main.c             \
        src/result.c          \
        src/health.c
 
-OBJS = $(patsubst src/%.c, build/obj/%.o, $(SRCS))
-BIN  = build/btorrent
+## Release and debug builds use separate object directories and binaries,
+## so switching between them never links objects built with the other flags.
+REL_OBJS = $(patsubst src/%.c, build/obj/release/%.o, $(SRCS))
+DBG_OBJS = $(patsubst src/%.c, build/obj/debug/%.o,   $(SRCS))
+BIN      = build/btorrent
+DBG_BIN  = build/btorrent-debug
 
-## ── Version flag injected at compile time ─────────────────────────────────
-VERFLAGS = -DBT_VERSION=\"$(VERSION)\"
+COMMON_CFLAGS = $(CSTD) $(WARN) $(IFLAGS) $(CURL_CFLAGS) \
+                -DBT_VERSION=\"$(VERSION)\" -D_FILE_OFFSET_BITS=64
+REL_CFLAGS    = -O2 -DNDEBUG -DLOG_MIN_LEVEL=1 $(HARDEN_CFLAGS)
+SAN_FLAGS     = -fsanitize=address,undefined -fno-omit-frame-pointer
+DBG_CFLAGS    = -g3 -O0 -DLOG_MIN_LEVEL=0 $(SAN_FLAGS)
 
 ## ── Release ───────────────────────────────────────────────────────────────
-all: CFLAGS  = $(CSTD) $(WARN) $(IFLAGS) $(CURL_CFLAGS) $(VERFLAGS) \
-               -O2 -DNDEBUG -DLOG_MIN_LEVEL=1 -D_FILE_OFFSET_BITS=64
-all: LDFLAGS = $(CURL_LIBS) -lpthread
 all: $(BIN)
 
-## ── Debug (AddressSanitizer + UBSan) ──────────────────────────────────────
-debug: CFLAGS  = $(CSTD) $(WARN) $(IFLAGS) $(CURL_CFLAGS) $(VERFLAGS) \
-                 -g3 -O0 -fsanitize=address,undefined \
-                 -DLOG_MIN_LEVEL=0 -D_FILE_OFFSET_BITS=64
-debug: LDFLAGS = $(CURL_LIBS) -lpthread -fsanitize=address,undefined
-debug: $(BIN)
+$(BIN): $(REL_OBJS)
+	$(CC) $(COMMON_CFLAGS) $(REL_CFLAGS) $(CFLAGS) -o $@ $^ \
+	    $(HARDEN_LDFLAGS) $(LDFLAGS) $(LIBS)
 
-$(BIN): $(OBJS) | build/obj
-	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
-
-build/obj/%.o: src/%.c | build/obj
+build/obj/release/%.o: src/%.c
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -MMD -MP -c $< -o $@
+	$(CC) $(COMMON_CFLAGS) $(REL_CFLAGS) $(CPPFLAGS) $(CFLAGS) -MMD -MP -c $< -o $@
 
--include $(OBJS:.o=.d)
+## ── Debug (AddressSanitizer + UBSan) → build/btorrent-debug ───────────────
+debug: $(DBG_BIN)
 
-build/obj:
-	@mkdir -p build/obj/core build/obj/proto build/obj/net \
-	           build/obj/cmd  build/obj/dht
+$(DBG_BIN): $(DBG_OBJS)
+	$(CC) $(COMMON_CFLAGS) $(DBG_CFLAGS) $(CFLAGS) -o $@ $^ $(LDFLAGS) $(LIBS)
+
+build/obj/debug/%.o: src/%.c
+	@mkdir -p $(dir $@)
+	$(CC) $(COMMON_CFLAGS) $(DBG_CFLAGS) $(CPPFLAGS) $(CFLAGS) -MMD -MP -c $< -o $@
+
+-include $(REL_OBJS:.o=.d) $(DBG_OBJS:.o=.d)
 
 ## ── Install ───────────────────────────────────────────────────────────────
 install: all
@@ -85,78 +108,80 @@ uninstall:
 	rm -f $(DESTDIR)$(PREFIX)/share/man/man1/btorrent.1
 
 ## ── Source tarball ────────────────────────────────────────────────────────
-## Produces btorrent-<VERSION>.tar.gz with a reproducible file list.
-## Excludes build artefacts, lock files, and editor droppings.
+## btorrent-<VERSION>.tar.gz from the committed tree (git archive): the
+## output depends only on HEAD, never on untracked or modified local files.
 dist:
-	@echo "Creating $(TARNAME).tar.gz ..."
-	@rm -rf /tmp/$(TARNAME)
-	@mkdir -p /tmp/$(TARNAME)
-	@git ls-files 2>/dev/null | tar -T - -c | tar -x -C /tmp/$(TARNAME) \
-	    || { echo "Not a git repo — copying all tracked files manually"; \
-	         cp -r . /tmp/$(TARNAME)/; \
-	         rm -rf /tmp/$(TARNAME)/build; }
-	@tar -czf $(TARNAME).tar.gz -C /tmp $(TARNAME)
-	@rm -rf /tmp/$(TARNAME)
+	@git rev-parse --git-dir >/dev/null 2>&1 || \
+	    { echo "make dist needs a git checkout" >&2; exit 1; }
+	@git diff --quiet HEAD -- || \
+	    echo "warning: uncommitted changes are NOT included in $(TARNAME).tar.gz" >&2
+	git archive --format=tar.gz --prefix=$(TARNAME)/ -o $(TARNAME).tar.gz HEAD
 	@echo "Created $(TARNAME).tar.gz"
 
 ## ── Tests ─────────────────────────────────────────────────────────────────
 TEST_COMMON = src/utils.c src/log.c src/result.c
 TEST_FLAGS  = $(CSTD) $(WARN) $(IFLAGS) -g3 -O0
+ifeq ($(SANITIZE),1)
+TEST_FLAGS += $(SAN_FLAGS) -fno-sanitize-recover=all
+endif
 
-test_sha1: build/obj
+build:
+	@mkdir -p build
+
+test_sha1: | build
 	$(CC) $(TEST_FLAGS) tests/unit/test_sha1.c src/core/sha1.c \
 	    $(TEST_COMMON) -o build/test_sha1
 	@echo "--- test_sha1 ---" && ./build/test_sha1
 
-test_peer: build/obj
+test_peer: | build
 	$(CC) $(TEST_FLAGS) tests/unit/test_peer.c src/proto/peer.c \
 	    src/core/sha1.c $(TEST_COMMON) -o build/test_peer
 	@echo "--- test_peer ---" && ./build/test_peer
 
-test_pieces: build/obj
+test_pieces: | build
 	$(CC) $(TEST_FLAGS) tests/unit/test_pieces.c src/core/pieces.c \
 	    src/core/sha1.c src/core/torrent.c src/core/bencode.c \
 	    src/proto/peer.c $(TEST_COMMON) -o build/test_pieces
 	@echo "--- test_pieces ---" && ./build/test_pieces
 
-test_magnet: build/obj
+test_magnet: | build
 	$(CC) $(TEST_FLAGS) tests/unit/test_magnet.c src/core/magnet.c \
 	    $(TEST_COMMON) -o build/test_magnet
 	@echo "--- test_magnet ---" && ./build/test_magnet
 
-test_ext: build/obj
+test_ext: | build
 	$(CC) $(TEST_FLAGS) tests/unit/test_ext.c \
 	    src/core/bencode.c src/core/sha1.c src/proto/ext_handshake.c \
 	    $(TEST_COMMON) -o build/test_ext
 	@echo "--- test_ext ---" && ./build/test_ext
 
-test_scheduler: build/obj
+test_scheduler: | build
 	$(CC) $(TEST_FLAGS) tests/unit/test_scheduler.c \
 	    src/core/bencode.c src/core/sha1.c src/proto/ext_handshake.c \
 	    $(TEST_COMMON) -o build/test_scheduler
 	@echo "--- test_scheduler ---" && ./build/test_scheduler
 
-test_publish: build/obj
+test_publish: | build
 	$(CC) $(TEST_FLAGS) -DBT_VERSION=\"$(VERSION)\" tests/unit/test_publish.c \
 	    src/core/pieces.c src/core/sha1.c src/core/torrent.c \
 	    src/core/bencode.c src/proto/peer.c \
 	    $(TEST_COMMON) -o build/test_publish
 	@echo "--- test_publish ---" && ./build/test_publish
 
-test_circuit: build/obj
+test_circuit: | build
 	$(CC) $(TEST_FLAGS) tests/integration/test_circuit_breaker.c \
 	    $(TEST_COMMON) -o build/test_circuit
 	@echo "--- test_circuit ---" && ./build/test_circuit
 
-test_netio: build/obj
+test_netio: | build
 	$(CC) $(TEST_FLAGS) tests/integration/test_netio.c \
 	    src/net/tcp.c $(TEST_COMMON) -o build/test_netio
 	@echo "--- test_netio ---" && ./build/test_netio
 
-test_tracker_v6: build/obj
-	$(CC) $(TEST_FLAGS) tests/unit/test_tracker_v6.c \
+test_tracker_v6: | build
+	$(CC) $(TEST_FLAGS) $(CURL_CFLAGS) tests/unit/test_tracker_v6.c \
 	    src/proto/tracker.c src/core/bencode.c \
-	    $(TEST_COMMON) -lcurl -o build/test_tracker_v6
+	    $(TEST_COMMON) $(LIBS) -o build/test_tracker_v6
 	@echo "--- test_tracker_v6 ---" && ./build/test_tracker_v6
 
 test: test_sha1 test_peer test_pieces test_magnet test_ext test_scheduler test_publish test_circuit test_netio test_tracker_v6

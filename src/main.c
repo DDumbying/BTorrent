@@ -91,7 +91,7 @@ static void print_usage(const char *prog) {
         "  %s -i ubuntu.torrent\n"
         "  %s -i ubuntu.torrent -j | jq .name\n"
         "\n"
-        "Report bugs: https://github.com/alsullam/Btorrent/issues\n",
+        "Report bugs: https://github.com/DDumbying/BTorrent/issues\n",
         BT_VERSION,
         prog, prog, prog, prog, prog, prog, prog, prog, prog
     );

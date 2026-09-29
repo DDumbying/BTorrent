@@ -1,19 +1,23 @@
 # Maintainer: Saeed Hany <saeed@saeeedhany.github.io>
+#
+# The release workflow publishes this file as a release asset with
+# sha256sums filled in for the tagged tarball; copy that one to the AUR.
 pkgname=btorrent
 pkgver=1.1.0
 pkgrel=1
 pkgdesc="Concurrent BitTorrent client with DHT, magnet links, seeding, and PEX"
-arch=('linux_amd64' 'linux_aarch64')
-url="https://alsullam.github.io/btorrent"
+arch=('x86_64' 'aarch64')
+url="https://github.com/DDumbying/BTorrent"
 license=('MIT')
-depends=('curl')
-makedepends=('pkg-config')
-source=("$pkgname-$pkgver.tar.gz::https://github.com/alsullam/Btorrent/archive/v$pkgver.tar.gz")
-sha256sums=('SKIP')  # Replace with: sha256sum btorrent-1.0.2.tar.gz
+depends=('curl' 'glibc')
+makedepends=('pkgconf')
+source=("https://github.com/DDumbying/BTorrent/releases/download/v$pkgver/$pkgname-$pkgver.tar.gz")
+sha256sums=('SKIP')
 
+# makepkg's CFLAGS/LDFLAGS already harden the build, hence HARDEN=0.
 build() {
     cd "$pkgname-$pkgver"
-    make VERSION="$pkgver" all
+    make VERSION="$pkgver" HARDEN=0 all
 }
 
 check() {
@@ -23,11 +27,8 @@ check() {
 
 package() {
     cd "$pkgname-$pkgver"
-    make install \
-        DESTDIR="$pkgdir" \
-        PREFIX=/usr \
-        VERSION="$pkgver"
-    install -Dm644 LICENSE     "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
-    install -Dm644 README.md   "$pkgdir/usr/share/doc/$pkgname/README.md"
-    install -Dm644 CHANGES.md  "$pkgdir/usr/share/doc/$pkgname/CHANGES.md"
+    make VERSION="$pkgver" HARDEN=0 PREFIX=/usr DESTDIR="$pkgdir" install
+    install -Dm644 LICENSE    "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+    install -Dm644 README.md  "$pkgdir/usr/share/doc/$pkgname/README.md"
+    install -Dm644 CHANGES.md "$pkgdir/usr/share/doc/$pkgname/CHANGES.md"
 }

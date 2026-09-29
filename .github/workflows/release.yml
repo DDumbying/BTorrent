@@ -1,78 +1,68 @@
-name: Release Packages
+name: Release
+
+# Push a tag vX.Y.Z (matching VERSION in the Makefile) to publish a GitHub
+# release with the source tarball, a .deb, and an AUR PKGBUILD whose
+# sha256sums match that tarball.
 
 on:
   push:
-    tags:
-      - 'v*'
+    tags: ['v*']
 
 permissions:
   contents: write
 
 jobs:
-  build:
-    runs-on: ubuntu-latest
+  release:
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+
+      - name: Check the tag matches the Makefile VERSION
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          mk="$(sed -n 's/^VERSION *= *//p' Makefile)"
+          if [ "$tag" != "$mk" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match Makefile VERSION $mk"
+            exit 1
+          fi
+          echo "VERSION=$tag" >> "$GITHUB_ENV"
 
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc make pkg-config libcurl4-openssl-dev \
-            devscripts debhelper
+          sudo apt-get install -y build-essential debhelper devscripts \
+            libcurl4-openssl-dev pkg-config
 
-      - name: Get version
-        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_ENV
+      - name: Unit tests
+        run: make test
 
-      - name: Create source tarball
-        run: make dist VERSION=$VERSION
+      - name: Source tarball
+        run: make dist
 
-      - name: Build Debian package
+      - name: Debian package
+        run: pkg/debian/build-deb.sh "btorrent-$VERSION.tar.gz" dist
+
+      - name: AUR PKGBUILD with checksum
+        run: |
+          sum="$(sha256sum "btorrent-$VERSION.tar.gz" | cut -d' ' -f1)"
+          sed -e "s/^pkgver=.*/pkgver=$VERSION/" \
+              -e "s/^sha256sums=.*/sha256sums=('$sum')/" \
+              pkg/aur/PKGBUILD > dist/PKGBUILD
+
+      - name: Release notes from CHANGES.md
+        run: |
+          # The "## vX.Y.Z" section, without its heading and "---" separators.
+          awk -v hdr="## v$VERSION" '
+            index($0, "## v") == 1 { if (on) exit; on = ($0 == hdr || index($0, hdr " ") == 1); next }
+            on && $0 != "---"
+          ' CHANGES.md > dist/notes.md
+          [ -s dist/notes.md ] || echo "btorrent $VERSION" > dist/notes.md
+
+      - name: Publish GitHub release
         env:
-          DEB_VERSION_UPSTREAM: ${{ env.VERSION }}
+          GH_TOKEN: ${{ github.token }}
         run: |
-          cp btorrent-*.tar.gz /tmp/
-          cd /tmp
-          tar xzf btorrent-$VERSION.tar.gz
-          cd btorrent-$VERSION
-          ln -sf ../pkg/debian/debian debian
-          dpkg-buildpackage -us -uc
-          ls -la /tmp/*.deb
-
-      - name: Upload Debian package
-        uses: actions/upload-release-asset@v1
-        with:
-          upload_url: ${{ github.event.inputs.upload_url }}
-          asset_path: /tmp/btorrent_*.deb
-          asset_name: btorrent_${{ env.VERSION }}_amd64.deb
-          asset_content_type: application/vnd.debian.binary-package
-
-  aur:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Get version
-        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_ENV
-
-      - name: Create source tarball
-        run: make dist VERSION=$VERSION
-
-      - name: Generate AUR package
-        run: |
-          cp btorrent-*.tar.gz pkg/aur/
-          cd pkg/aur
-          sha256sum btorrent-$VERSION.tar.gz
-
-      - name: Upload AUR files
-        uses: actions/upload-release-asset@v1
-        with:
-          upload_url: ${{ github.event.inputs.upload_url }}
-          asset_path: pkg/aur/PKGBUILD
-          asset_name: PKGBUILD
-          asset_content_type: text/plain
-
-      - name: Show sha256sum
-        run: |
-          cd pkg/aur
-          echo "Add this to PKGBUILD sha256sums:"
-          sha256sum btorrent-$VERSION.tar.gz
+          gh release create "$GITHUB_REF_NAME" \
+            --title "btorrent $VERSION" \
+            --notes-file dist/notes.md \
+            "btorrent-$VERSION.tar.gz" dist/*.deb dist/PKGBUILD

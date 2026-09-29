@@ -4,13 +4,12 @@ Release:        1%{?dist}
 Summary:        Concurrent BitTorrent client with DHT and magnet link support
 
 License:        MIT
-URL:            https://alsullam.github.io/btorrent
-Source0:        %{name}-%{version}.tar.gz
+URL:            https://github.com/DDumbying/BTorrent
+Source0:        %{url}/releases/download/v%{version}/%{name}-%{version}.tar.gz
 
 BuildRequires:  gcc
 BuildRequires:  make
 BuildRequires:  pkgconfig(libcurl)
-Requires:       libcurl
 
 %description
 btorrent is a command-line BitTorrent client for Linux written by Saeed Hany.
@@ -26,14 +25,16 @@ Protocols implemented: BEP 3, 5, 9, 10, 11, 12, 15.
 %prep
 %autosetup
 
+# %%optflags / %%build_ldflags already harden the build, hence HARDEN=0.
 %build
-%make_build VERSION=%{version} all
+%set_build_flags
+%make_build VERSION=%{version} HARDEN=0 all
 
 %check
 %make_build test
 
 %install
-%make_install PREFIX=%{_prefix} VERSION=%{version}
+%make_install PREFIX=%{_prefix} VERSION=%{version} HARDEN=0
 
 %files
 %license LICENSE
@@ -42,5 +43,8 @@ Protocols implemented: BEP 3, 5, 9, 10, 11, 12, 15.
 %{_mandir}/man1/btorrent.1*
 
 %changelog
-* Sun Apr 13 2026 Saeed Hany <saeed@saeeedhany.github.io> - 1.0.2-1
+* Thu Apr 16 2026 Saeed Hany <saeed@saeeedhany.github.io> - 1.1.0-1
+- Update to 1.1.0: IPv6 peers, UDP connection ID caching.
+
+* Mon Apr 13 2026 Saeed Hany <saeed@saeeedhany.github.io> - 1.0.2-1
 - Initial release.

@@ -36,16 +36,25 @@ The goal is not just to download files, but to understand how decentralized netw
 sudo apt install libcurl4-openssl-dev
 
 # Build
-make          # Release build
-make debug    # Debug build with AddressSanitizer
-make test     # Run all tests
+make          # Release build          → build/btorrent
+make debug    # ASan + UBSan build     → build/btorrent-debug
+make test     # Run all tests (add SANITIZE=1 to run them under ASan + UBSan)
 make clean    # Clean build artifacts
 ```
+
+Distro build flags are honoured: `CFLAGS`, `CPPFLAGS` and `LDFLAGS` are
+appended to the Makefile's own. Pass `HARDEN=0` if your flags already
+include hardening (as `dpkg-buildflags`, `makepkg` and `rpm` do), and
+`WERROR=1` to fail on warnings.
+
+Packaging lives in `pkg/` (Debian, AUR, RPM). Pushing a `vX.Y.Z` tag that
+matches `VERSION` in the Makefile publishes a GitHub release with the source
+tarball, a `.deb`, and an AUR `PKGBUILD` with checksums filled in.
 
 ## Usage
 
 ```
-btorrent 1.0.2 — BitTorrent client
+btorrent 1.1.0 — BitTorrent client
 
 Usage:
   btorrent -d <file.torrent> [options]   Download a torrent
