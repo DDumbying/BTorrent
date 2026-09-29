@@ -41,23 +41,26 @@ int  log_is_tty(void);
 /* Returns the active log FILE* (always non-NULL after log_init). */
 FILE *log_dest(void);
 
-/* Internal — do not call directly. */
+/* Internal — do not call directly.
+ * The macros take (...) and forward __VA_ARGS__ whole — the format string is
+ * its first element — which is standard C11. The older (fmt, ...) form
+ * needed the GNU ", ##__VA_ARGS__" extension for zero-argument calls. */
 void _log_write(LogLevel level, const char *file, int line,
                 const char *fmt, ...)
     __attribute__((format(printf, 4, 5)));
 
-#define LOG_DEBUG(fmt, ...) \
+#define LOG_DEBUG(...) \
     do { if (LOG_DEBUG >= LOG_MIN_LEVEL) \
-        _log_write(LOG_DEBUG, __FILE__, __LINE__, fmt, ##__VA_ARGS__); } while(0)
+        _log_write(LOG_DEBUG, __FILE__, __LINE__, __VA_ARGS__); } while(0)
 
-#define LOG_INFO(fmt, ...) \
+#define LOG_INFO(...) \
     do { if (LOG_INFO >= LOG_MIN_LEVEL) \
-        _log_write(LOG_INFO,  __FILE__, __LINE__, fmt, ##__VA_ARGS__); } while(0)
+        _log_write(LOG_INFO,  __FILE__, __LINE__, __VA_ARGS__); } while(0)
 
-#define LOG_WARN(fmt, ...) \
+#define LOG_WARN(...) \
     do { if (LOG_WARN >= LOG_MIN_LEVEL) \
-        _log_write(LOG_WARN,  __FILE__, __LINE__, fmt, ##__VA_ARGS__); } while(0)
+        _log_write(LOG_WARN,  __FILE__, __LINE__, __VA_ARGS__); } while(0)
 
-#define LOG_ERROR(fmt, ...) \
+#define LOG_ERROR(...) \
     do { if (LOG_ERROR >= LOG_MIN_LEVEL) \
-        _log_write(LOG_ERROR, __FILE__, __LINE__, fmt, ##__VA_ARGS__); } while(0)
+        _log_write(LOG_ERROR, __FILE__, __LINE__, __VA_ARGS__); } while(0)
