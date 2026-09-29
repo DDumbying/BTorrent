@@ -24,6 +24,7 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <sys/stat.h>
 
 static int passed = 0, failed = 0;
 #define ASSERT(cond, label) \
@@ -75,7 +76,7 @@ static void test_complete_piece(void) {
 
     /* bogus hashes → resume finds nothing → all pieces start EMPTY */
     TorrentInfo *t = make_test_torrent(BLOCK_SIZE, 2, tmp, 1);
-    PieceManager *pm = piece_manager_new(t, tmp);
+    PieceManager *pm = piece_manager_new(t, tmp, 0);
 
     ASSERT(pm->completed == 0, "initial: no pieces completed");
 
@@ -103,7 +104,7 @@ static void test_corrupt_piece_rejected(void) {
 
     /* bogus hashes → no resume, no accidental match */
     TorrentInfo *t = make_test_torrent(BLOCK_SIZE, 1, tmp, 1);
-    PieceManager *pm = piece_manager_new(t, tmp);
+    PieceManager *pm = piece_manager_new(t, tmp, 0);
 
     uint8_t *block = xmalloc(BLOCK_SIZE);
     memset(block, 0xAB, BLOCK_SIZE);   /* non-zero, never matches 0xFF hash */
@@ -127,7 +128,7 @@ static void test_two_block_piece(void) {
 
     int piece_len = BLOCK_SIZE * 2;
     TorrentInfo *t = make_test_torrent(piece_len, 1, tmp, 1);
-    PieceManager *pm = piece_manager_new(t, tmp);
+    PieceManager *pm = piece_manager_new(t, tmp, 0);
 
     /* Build a deterministic piece: first block = 0xAA, second = 0xBB */
     uint8_t *blk0 = xmalloc(BLOCK_SIZE);
@@ -159,7 +160,7 @@ static void test_next_needed_skips_complete(void) {
     unlink(tmp);
 
     TorrentInfo *t = make_test_torrent(BLOCK_SIZE, 3, tmp, 1);
-    PieceManager *pm = piece_manager_new(t, tmp);
+    PieceManager *pm = piece_manager_new(t, tmp, 0);
 
     /* Mark piece 0 complete manually */
     pm->pieces[0].state = PIECE_COMPLETE;
@@ -180,7 +181,7 @@ static void test_next_needed_peer_filter(void) {
     unlink(tmp);
 
     TorrentInfo *t = make_test_torrent(BLOCK_SIZE, 4, tmp, 1);
-    PieceManager *pm = piece_manager_new(t, tmp);
+    PieceManager *pm = piece_manager_new(t, tmp, 0);
 
     /* Peer only has piece 2 */
     uint8_t peer_bf[1] = { 0 };
@@ -219,12 +220,12 @@ static void test_resume(void) {
     TorrentInfo *t = make_test_torrent(BLOCK_SIZE, 3, tmp, 0);
 
     /* First manager: should find all 3 pieces already matching */
-    PieceManager *pm = piece_manager_new(t, tmp);
+    PieceManager *pm = piece_manager_new(t, tmp, 0);
     int resumed = pm->completed;
     piece_manager_free(pm);
 
     /* Second manager on same file: must see same count */
-    PieceManager *pm2 = piece_manager_new(t, tmp);
+    PieceManager *pm2 = piece_manager_new(t, tmp, 0);
     ASSERT(pm2->completed == resumed, "resume: second open finds same completed count");
     ASSERT(resumed == 3, "resume: all 3 zero-filled pieces verified from disk");
     piece_manager_free(pm2);
@@ -233,12 +234,101 @@ static void test_resume(void) {
     unlink(tmp);
 }
 
+/* ── read_block: ranges within a piece ───────────────────────────────────── */
+static void test_read_block(void) {
+    const char *tmp = "/tmp/bt_test_read_block.bin";
+    unlink(tmp);
+    TorrentInfo *t = make_test_torrent(2 * BLOCK_SIZE, 2, tmp, 1);
+    int fd = open(tmp, O_RDWR | O_CREAT | O_TRUNC, 0644);
+    for (int i = 0; i < 4 * BLOCK_SIZE; i++) {
+        uint8_t b = (uint8_t)(i * 7);
+        if (write(fd, &b, 1) != 1) break;
+    }
+    close(fd);
+    PieceManager *pm = piece_manager_new(t, tmp, 0);
+
+    uint8_t buf[BLOCK_SIZE];
+    ASSERT(piece_manager_read_block(pm, 1, BLOCK_SIZE, 100, buf) == 1 &&
+           buf[0] == (uint8_t)((3 * BLOCK_SIZE) * 7) && buf[99] == (uint8_t)((3 * BLOCK_SIZE + 99) * 7),
+           "read_block: bytes come from the right file offset");
+    ASSERT(piece_manager_read_block(pm, 1, 2 * BLOCK_SIZE - 10, 20, buf) == 0,
+           "read_block: range past the piece end rejected");
+    ASSERT(piece_manager_read_block(pm, 2, 0, 10, buf) == 0 &&
+           piece_manager_read_block(pm, -1, 0, 10, buf) == 0,
+           "read_block: bad piece index rejected");
+
+    piece_manager_free(pm);
+    free(t->pieces_hash); free(t);
+    unlink(tmp);
+    unlink("/tmp/bt_test_read_block.bin.btresume");
+}
+
+/* ── Fast resume ─────────────────────────────────────────────────────────── */
+static void corrupt_keep_mtime(const char *path, off_t off) {
+    struct stat st;
+    stat(path, &st);
+    int fd = open(path, O_RDWR);
+    uint8_t x = 0xAB;
+    if (pwrite(fd, &x, 1, off) != 1) perror("pwrite");
+    struct timespec ts[2] = { st.st_atim, st.st_mtim };
+    futimens(fd, ts);            /* put the old mtime back */
+    close(fd);
+}
+
+static void test_fast_resume(void) {
+    const char *tmp    = "/tmp/bt_test_resume.bin";
+    const char *resume = "/tmp/bt_test_resume.bin.btresume";
+    unlink(tmp); unlink(resume);
+    /* Real hashes of zero-filled pieces, and a zero-filled file. */
+    TorrentInfo *t = make_test_torrent(BLOCK_SIZE, 4, tmp, 0);
+    int fd = open(tmp, O_RDWR | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0 || ftruncate(fd, 4 * BLOCK_SIZE) < 0) perror("setup");
+    close(fd);
+
+    PieceManager *pm = piece_manager_new(t, tmp, 1);
+    ASSERT(pm->completed == 4, "resume: no record yet, all 4 pieces hashed");
+    piece_manager_free(pm);
+    ASSERT(access(resume, F_OK) == 0, "resume: record written on free");
+
+    /* Change a piece's bytes but keep the mtime: the record still matches,
+     * so it is trusted — which proves no hashing happened. */
+    corrupt_keep_mtime(tmp, BLOCK_SIZE + 5);
+    pm = piece_manager_new(t, tmp, 1);
+    ASSERT(pm->completed == 4, "resume: valid record trusted without hashing");
+    piece_manager_free(pm);
+
+    /* -c (use_resume = 0) always re-verifies and catches the corruption. */
+    pm = piece_manager_new(t, tmp, 0);
+    ASSERT(pm->completed == 3 && pm->pieces[1].state != PIECE_COMPLETE,
+           "resume: full verify ignores the record and finds the bad piece");
+    piece_manager_free(pm);   /* records the verified state: 3 pieces */
+
+    /* Any later write changes the mtime, so a stale record is rejected. */
+    corrupt_keep_mtime(tmp, 5);                /* piece 0 now bad too... */
+    struct timespec now[2] = { { 0, UTIME_NOW }, { 0, UTIME_NOW } };
+    utimensat(AT_FDCWD, tmp, now, 0);          /* ...and the mtime moved on */
+    pm = piece_manager_new(t, tmp, 1);
+    ASSERT(pm->completed == 2, "resume: mtime changed, record rejected, rehashed");
+    piece_manager_free(pm);
+
+    /* A record for a different torrent is never used. Corrupt piece 2 with
+     * the mtime kept, so trusting the record would wrongly report 2. */
+    corrupt_keep_mtime(tmp, 2 * BLOCK_SIZE + 5);
+    t->info_hash[0] ^= 0xFF;
+    pm = piece_manager_new(t, tmp, 1);
+    ASSERT(pm->completed == 1, "resume: record for another info_hash ignored");
+    piece_manager_free(pm);
+
+    free(t->pieces_hash); free(t);
+    unlink(tmp); unlink(resume);
+}
+
 /* ── Security regressions: peer-controlled block offsets ─────────────────── */
 static void test_on_block_rejects_hostile_offsets(void) {
     const char *tmp = "/tmp/bt_test_hostile.bin";
     unlink(tmp);
     TorrentInfo *t = make_test_torrent(2 * BLOCK_SIZE, 1, tmp, 1);
-    PieceManager *pm = piece_manager_new(t, tmp);
+    PieceManager *pm = piece_manager_new(t, tmp, 0);
     uint8_t blk[BLOCK_SIZE] = {0};
 
     /* begin + len overflowed int and passed the old bounds check */
@@ -383,6 +473,8 @@ int main(void) {
     test_next_needed_skips_complete();
     test_next_needed_peer_filter();
     test_resume();
+    test_read_block();
+    test_fast_resume();
     test_on_block_rejects_hostile_offsets();
     test_bitfield_negative_index();
     test_torrent_validation();

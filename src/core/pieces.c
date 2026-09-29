@@ -120,8 +120,122 @@ static int *open_output_fds(PieceManager *pm) {
     return fds;
 }
 
+/* ── Fast resume ───────────────────────────────────────────────────────────
+ *
+ * On a clean exit we record which pieces are complete in <out>.btresume,
+ * together with every output file's size and modification time. On the next
+ * start, if the torrent and all file sizes/mtimes still match, the recorded
+ * pieces are trusted instead of re-hashing everything on disk (which for a
+ * multi-GB torrent takes seconds to minutes).
+ *
+ * Any write to the data after the record was taken changes a file's mtime,
+ * so a stale record — e.g. after a crash mid-download, or a file edited by
+ * hand — is rejected and we fall back to a full hash check. The data files
+ * are fdatasync()ed before the record is written.
+ *
+ * Layout (big-endian): "BTRESUME" u32 version, info_hash[20], u32 num_pieces,
+ * u32 num_files, then per file: u64 size, u64 mtime_sec, u32 mtime_nsec,
+ * then the completed-pieces bitfield.
+ */
+#define RESUME_MAGIC   "BTRESUME"
+#define RESUME_VERSION 1
+
+static void put_be(uint8_t *p, uint64_t v, int n) {
+    for (int i = n - 1; i >= 0; i--) { p[i] = (uint8_t)v; v >>= 8; }
+}
+static uint64_t get_be(const uint8_t *p, int n) {
+    uint64_t v = 0;
+    for (int i = 0; i < n; i++) v = (v << 8) | p[i];
+    return v;
+}
+
+static void resume_path(const PieceManager *pm, char *out, size_t cap) {
+    snprintf(out, cap, "%s.btresume", pm->out_path);
+}
+
+/* Serialise the header + file stamps + bitfield. Returns malloc'd buffer. */
+static uint8_t *resume_encode(PieceManager *pm, size_t *out_len) {
+    const TorrentInfo *t = pm->torrent;
+    size_t len = 8 + 4 + 20 + 4 + 4 + (size_t)t->num_files * 20 + (size_t)pm->bf_len;
+    uint8_t *buf = xcalloc(len, 1), *p = buf;
+    memcpy(p, RESUME_MAGIC, 8);              p += 8;
+    put_be(p, RESUME_VERSION, 4);            p += 4;
+    memcpy(p, t->info_hash, 20);             p += 20;
+    put_be(p, (uint64_t)t->num_pieces, 4);   p += 4;
+    put_be(p, (uint64_t)t->num_files, 4);    p += 4;
+    for (int i = 0; i < t->num_files; i++) {
+        struct stat st;
+        if (pm->file_fds[i] < 0 || fstat(pm->file_fds[i], &st) < 0) {
+            free(buf); return NULL;
+        }
+        put_be(p, (uint64_t)st.st_size, 8);          p += 8;
+        put_be(p, (uint64_t)st.st_mtim.tv_sec, 8);   p += 8;
+        put_be(p, (uint64_t)st.st_mtim.tv_nsec, 4);  p += 4;
+    }
+    memcpy(p, pm->our_bitfield, (size_t)pm->bf_len);
+    *out_len = len;
+    return buf;
+}
+
+static void resume_save(PieceManager *pm) {
+    for (int i = 0; i < pm->torrent->num_files; i++)
+        if (pm->file_fds[i] >= 0 && fdatasync(pm->file_fds[i]) < 0) {
+            LOG_WARN("resume: fdatasync failed: %s", strerror(errno));
+            return;
+        }
+    size_t len;
+    uint8_t *buf = resume_encode(pm, &len);
+    if (!buf) return;
+
+    /* Write a temp file and rename it, so a crash never leaves a torn record. */
+    char path[1100], tmp[1110];
+    resume_path(pm, path, sizeof(path));
+    snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+    int fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+    int ok = fd >= 0 && write(fd, buf, len) == (ssize_t)len && fsync(fd) == 0;
+    if (fd >= 0) close(fd);
+    if (ok) ok = rename(tmp, path) == 0;
+    if (!ok) { LOG_WARN("resume: cannot write %s: %s", path, strerror(errno)); unlink(tmp); }
+    free(buf);
+}
+
+/* Returns the number of pieces restored, or -1 if there is no usable record. */
+static int resume_load(PieceManager *pm) {
+    char path[1100];
+    resume_path(pm, path, sizeof(path));
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return -1;
+
+    size_t want;
+    uint8_t *cur = resume_encode(pm, &want);   /* what the record should say */
+    uint8_t *rec = cur ? xmalloc(want + 1) : NULL;
+    ssize_t got  = rec ? read(fd, rec, want + 1) : -1;
+    close(fd);
+
+    /* Everything before the bitfield — torrent identity and every file's
+     * size and mtime — must match byte for byte. */
+    size_t hdr = want - (size_t)pm->bf_len;
+    int restored = -1;
+    if (got == (ssize_t)want && memcmp(rec, cur, hdr) == 0 &&
+        get_be(rec + 8, 4) == RESUME_VERSION) {
+        restored = 0;
+        const uint8_t *bf = rec + hdr;
+        for (int i = 0; i < pm->num_pieces; i++) {
+            if (!bitfield_has_piece(bf, i)) continue;
+            pm->pieces[i].state = PIECE_COMPLETE;
+            bitfield_set_piece(pm->our_bitfield, i);
+            pm->completed++;
+            restored++;
+        }
+    }
+    free(cur);
+    free(rec);
+    return restored;
+}
+
 PieceManager *piece_manager_new(const TorrentInfo *torrent,
-                                const char        *out_path) {
+                                const char        *out_path,
+                                int                use_resume) {
     PieceManager *pm = xcalloc(1, sizeof(PieceManager));
     pm->torrent    = torrent;
     pm->num_pieces = torrent->num_pieces;
@@ -201,12 +315,16 @@ PieceManager *piece_manager_new(const TorrentInfo *torrent,
              torrent->num_files, torrent->num_files == 1 ? "" : "s",
              (double)torrent->total_length / (1024.0 * 1024.0));
 
-    /* Resume: verify pieces already on disk.
-     * pread on sparse file holes returns zeros instantly (no I/O),
-     * so iterating all pieces is fast even for large files. */
-    int resumed = 0;
-    uint8_t *buf = xmalloc((size_t)torrent->piece_length);
-    for (int i = 0; i < pm->num_pieces; i++) {
+    /* Resume: trust a valid fast-resume record if allowed; otherwise verify
+     * every piece already on disk by hash. (pread on sparse-file holes
+     * returns zeros without I/O, so a fresh download scans quickly.) */
+    int resumed = use_resume ? resume_load(pm) : -1;
+    if (resumed >= 0)
+        LOG_INFO("pieces: fast resume — %d pieces from %s.btresume",
+                 resumed, out_path);
+    uint8_t *buf = resumed >= 0 ? NULL : xmalloc((size_t)torrent->piece_length);
+    if (resumed < 0) resumed = 0;
+    for (int i = 0; buf && i < pm->num_pieces; i++) {
         int plen = pm->pieces[i].piece_length;
         if (!piece_manager_read_piece(pm, i, buf)) continue;
         uint8_t hash[20];
@@ -235,6 +353,9 @@ PieceManager *piece_manager_new(const TorrentInfo *torrent,
 
 void piece_manager_free(PieceManager *pm) {
     if (!pm) return;
+    /* Record progress for a fast restart — only if we hold the output lock,
+     * i.e. no other instance can be writing these files. */
+    if (pm->file_fds && pm->lock_fd >= 0) resume_save(pm);
     if (pm->file_fds) {
         for (int i = 0; i < pm->torrent->num_files; i++)
             if (pm->file_fds[i] >= 0) close(pm->file_fds[i]);
@@ -265,39 +386,53 @@ void piece_manager_free(PieceManager *pm) {
 }
 
 /*
- * rw_piece_multifile — read or write a piece across one or more files.
- * Uses pwrite/pread: atomic positional I/O, no fseek needed.
+ * rw_range — read or write `len` bytes starting `begin` bytes into a piece,
+ * spanning file boundaries as needed. Uses pread/pwrite (positional I/O).
+ * Returns 1 if every byte was transferred, 0 otherwise.
  */
-static int rw_piece_multifile(PieceManager *pm, int piece_idx,
-                              uint8_t *buf, int write_mode) {
+static int rw_range(PieceManager *pm, int piece_idx, int begin, int len,
+                    uint8_t *buf, int write_mode) {
     const TorrentInfo *t = pm->torrent;
-    long piece_start = (long)piece_idx * t->piece_length;
-    int  piece_len   = pm->pieces[piece_idx].piece_length;
-    long piece_end   = piece_start + piece_len;
-    int  buf_pos     = 0;
+    long long start = (long long)piece_idx * t->piece_length + begin;
+    long long end   = start + len;
+    int buf_pos = 0;
 
     for (int fi = 0; fi < t->num_files; fi++) {
-        long file_start = t->files[fi].offset;
-        long file_end   = file_start + t->files[fi].length;
-        long ov_start   = piece_start > file_start ? piece_start : file_start;
-        long ov_end     = piece_end   < file_end   ? piece_end   : file_end;
+        long long file_start = t->files[fi].offset;
+        long long file_end   = file_start + t->files[fi].length;
+        long long ov_start   = start > file_start ? start : file_start;
+        long long ov_end     = end   < file_end   ? end   : file_end;
         if (ov_start >= ov_end) continue;
 
-        long file_off  = ov_start - file_start;
-        int  chunk_len = (int)(ov_end - ov_start);
-        int  fd        = pm->file_fds[fi];
+        off_t file_off  = (off_t)(ov_start - file_start);
+        int   chunk_len = (int)(ov_end - ov_start);
+        int   fd        = pm->file_fds[fi];
         if (fd < 0) continue;
 
         if (write_mode) {
-            ssize_t written = pwrite(fd, buf + buf_pos, (size_t)chunk_len, (off_t)file_off);
+            ssize_t written = pwrite(fd, buf + buf_pos, (size_t)chunk_len, file_off);
             if (written != chunk_len) { LOG_WARN("pwrite failed: %s", strerror(errno)); return 0; }
         } else {
-            ssize_t got = pread(fd, buf + buf_pos, (size_t)chunk_len, (off_t)file_off);
+            ssize_t got = pread(fd, buf + buf_pos, (size_t)chunk_len, file_off);
             if (got != chunk_len) return 0;
         }
         buf_pos += chunk_len;
     }
-    return (buf_pos == piece_len);
+    return buf_pos == len;
+}
+
+static int rw_piece_multifile(PieceManager *pm, int piece_idx,
+                              uint8_t *buf, int write_mode) {
+    return rw_range(pm, piece_idx, 0, pm->pieces[piece_idx].piece_length,
+                    buf, write_mode);
+}
+
+int piece_manager_read_block(PieceManager *pm, int piece_idx,
+                             int begin, int len, uint8_t *buf) {
+    if (piece_idx < 0 || piece_idx >= pm->num_pieces || begin < 0 || len <= 0 ||
+        (long long)begin + len > pm->pieces[piece_idx].piece_length)
+        return 0;
+    return rw_range(pm, piece_idx, begin, len, buf, 0);
 }
 
 int piece_manager_read_piece(PieceManager *pm, int piece_idx, uint8_t *buf) {
