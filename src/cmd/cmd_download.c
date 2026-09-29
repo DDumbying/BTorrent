@@ -315,7 +315,7 @@ magnet_resume:; /* semicolon: label must precede a statement, not a declaration 
 
     /* 4. Piece manager (auto-resumes from existing output) */
     LOG_INFO("[3/4] Piece manager → %s", out_path);
-    PieceManager *pm = piece_manager_new(torrent, out_path);
+    PieceManager *pm = piece_manager_new(torrent, out_path, /*use_resume=*/1);
     if (!pm) {
         peer_list_free(&peers);
         torrent_free(torrent);

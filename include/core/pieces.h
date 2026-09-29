@@ -49,7 +49,15 @@ typedef struct {
     int      lock_fd;
 } PieceManager;
 
-PieceManager *piece_manager_new(const TorrentInfo *torrent, const char *out_path);
+/**
+ * piece_manager_new — open (creating if needed) the output files and find
+ * which pieces are already complete. With use_resume, a valid fast-resume
+ * record (<out_path>.btresume, written by piece_manager_free) is trusted
+ * instead of hashing every piece; without it — e.g. for `-c` — every piece
+ * on disk is verified.
+ */
+PieceManager *piece_manager_new(const TorrentInfo *torrent, const char *out_path,
+                                int use_resume);
 void          piece_manager_free(PieceManager *pm);
 
 int  piece_manager_on_block(PieceManager *pm, int piece_index,
@@ -62,3 +70,7 @@ int  piece_manager_next_needed(PieceManager  *pm,
 int  piece_manager_is_complete(const PieceManager *pm);
 void piece_manager_print_progress(const PieceManager *pm);
 int  piece_manager_read_piece(PieceManager *pm, int piece_idx, uint8_t *buf);
+
+/** Read `len` bytes at `begin` within a piece (bounds-checked). 1 on success. */
+int  piece_manager_read_block(PieceManager *pm, int piece_idx,
+                              int begin, int len, uint8_t *buf);

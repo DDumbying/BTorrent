@@ -28,6 +28,7 @@ The goal is not just to download files, but to understand how decentralized netw
 | Seeding mode | Done | - |
 | Rate limiting | Done | - |
 | File locking | Done | - |
+| Fast resume | Done | - |
 
 ## Building
 
@@ -124,6 +125,16 @@ btorrent -d ubuntu.torrent -v -l debug.log
 # Magnet link
 btorrent -d "magnet:?xt=urn:btih:..."
 ```
+
+### Resuming
+
+Re-running the same `-d` command continues an interrupted download. On a
+clean exit (finished or Ctrl+C) btorrent writes `<output>.btresume` next to
+the data, recording which pieces are complete along with each file's size
+and modification time. The next run trusts that record, so a restart skips
+re-hashing gigabytes, but only if the files are untouched. If a file's size
+or modification time differs (a crash mid-write, or the file was edited),
+every piece is hashed again. `-c` always hashes every piece.
 
 ## Project Structure
 

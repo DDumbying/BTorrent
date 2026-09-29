@@ -102,44 +102,83 @@ static int tb_try_consume(TokenBucket *tb, long long want) {
 }
 
 /* ── Per-session read buffer ─────────────────────────────────────────────── */
-
-#define RBUF_SIZE (1024 * 1024)
+/*
+ * Unread bytes live in data[start, start + len). Consuming a message just
+ * advances `start`; bytes are only moved (compacted to the front) when the
+ * free space at the tail runs low. The old version memmove()d the whole
+ * remaining buffer — up to 1 MiB — for every message consumed.
+ */
+#define RBUF_SIZE     (1024 * 1024)
+#define RBUF_MIN_TAIL (64 * 1024)
+#define MAX_MSG_LEN   (RBUF_SIZE - 4)   /* a message must fit in the buffer */
 
 typedef struct {
     uint8_t *data;
+    size_t   start;
     size_t   len;
     size_t   cap;
 } ReadBuf;
 
 static void rbuf_init(ReadBuf *b) {
-    b->data = xmalloc(RBUF_SIZE);
-    b->len  = 0;
-    b->cap  = RBUF_SIZE;
+    b->data  = xmalloc(RBUF_SIZE);
+    b->start = 0;
+    b->len   = 0;
+    b->cap   = RBUF_SIZE;
 }
 
 static void rbuf_free(ReadBuf *b) {
     free(b->data);
-    b->data = NULL;
-    b->len  = 0;
+    b->data  = NULL;
+    b->start = b->len = 0;
 }
 
+static uint8_t *rbuf_peek(ReadBuf *b) { return b->data + b->start; }
+
+/* Read everything available. Returns 0 when the socket is drained (EAGAIN),
+ * 1 if the buffer filled up first (more may be pending — with edge-triggered
+ * epoll the caller must consume and call again), -1 on EOF or error. */
 static int rbuf_fill(ReadBuf *b, int sock) {
-    while (b->len < b->cap) {
-        ssize_t n = recv(sock, b->data + b->len, b->cap - b->len, 0);
+    for (;;) {
+        if (b->start > 0 && b->cap - (b->start + b->len) < RBUF_MIN_TAIL) {
+            memmove(b->data, b->data + b->start, b->len);
+            b->start = 0;
+        }
+        size_t tail = b->cap - (b->start + b->len);
+        if (tail == 0) return 1;
+        ssize_t n = recv(sock, b->data + b->start + b->len, tail, 0);
         if (n > 0) { b->len += (size_t)n; continue; }
         if (n == 0) return -1;
+        if (errno == EINTR) continue;
         if (errno == EAGAIN || errno == EWOULDBLOCK) return 0;
         return -1;
     }
-    return 0;
 }
 
 static int rbuf_consume(ReadBuf *b, size_t need, uint8_t *dst) {
     if (b->len < need) return 0;
-    if (dst) memcpy(dst, b->data, need);
-    memmove(b->data, b->data + need, b->len - need);
-    b->len -= need;
+    if (dst) memcpy(dst, rbuf_peek(b), need);
+    b->start += need;
+    b->len   -= need;
+    if (b->len == 0) b->start = 0;
     return 1;
+}
+
+/* ── Piece availability ──────────────────────────────────────────────────── */
+/*
+ * How many connected peers have each piece, updated as BITFIELD and HAVE
+ * messages arrive and sessions close — so picking the rarest piece is one
+ * pass over the pieces instead of recounting every peer's bitfield (peers x
+ * pieces bit tests, plus an allocation) on every assignment.
+ * NULL when no scheduler is running (e.g. under the fuzzer): all pieces are
+ * then treated as equally available.
+ */
+static int *g_avail;
+static int  g_avail_n;   /* == num_pieces; bitfields may carry spare bits */
+
+static void avail_apply(const uint8_t *bitfield, int delta) {
+    if (!g_avail || !bitfield) return;
+    for (int i = 0; i < g_avail_n; i++)
+        if (bitfield_has_piece(bitfield, i)) g_avail[i] += delta;
 }
 
 /* ── Session state machine ───────────────────────────────────────────────── */
@@ -391,28 +430,15 @@ static int inject_peers(PeerList *peers, const Peer *new_peers, int count) {
 
 /* ── Piece selection ─────────────────────────────────────────────────────── */
 
-static int next_rarest(PieceManager *pm,
-                        Session *sessions, int max_s,
-                        const uint8_t *peer_bf, int num_pieces) {
-    int *avail = xcalloc((size_t)pm->num_pieces, sizeof(int));
-    for (int s = 0; s < max_s; s++) {
-        if (sessions[s].phase == PS_DEAD || !sessions[s].peer_bitfield) continue;
-        for (int i = 0; i < pm->num_pieces; i++)
-            if (bitfield_has_piece(sessions[s].peer_bitfield, i)) avail[i]++;
-    }
+/* Among EMPTY pieces this peer has, pick the one fewest peers have. */
+static int next_rarest(const PieceManager *pm, const uint8_t *peer_bf) {
     int best = -1, best_n = INT_MAX;
     for (int i = 0; i < pm->num_pieces; i++) {
         if (pm->pieces[i].state != PIECE_EMPTY) continue;
-        if (peer_bf && i < num_pieces && !bitfield_has_piece(peer_bf, i)) continue;
-        if (avail[i] > 0 && avail[i] < best_n) { best = i; best_n = avail[i]; }
+        if (!peer_bf || !bitfield_has_piece(peer_bf, i)) continue;
+        int n = g_avail ? g_avail[i] : 1;
+        if (n < best_n) { best = i; best_n = n; if (n <= 1) break; }
     }
-    if (best == -1 && peer_bf) {
-        for (int i = 0; i < pm->num_pieces; i++) {
-            if (pm->pieces[i].state != PIECE_EMPTY) continue;
-            if (i < num_pieces && bitfield_has_piece(peer_bf, i)) { best = i; break; }
-        }
-    }
-    free(avail);
     return best;
 }
 
@@ -480,10 +506,12 @@ static int serve_block(Session *s, PieceManager *pm,
     if (begin < 0 || length <= 0 || (long long)begin + length > plen) return -1;
     if (pm->pieces[pi].state != PIECE_COMPLETE) return -1;
 
-    uint8_t *piece_data = xmalloc((size_t)plen);
-    if (!piece_manager_read_piece(pm, pi, piece_data)) {
-        free(piece_data); return -1;
-    }
+    /* Read only the requested block — previously the whole piece was read
+     * for every 16 KiB block served (16x the I/O for 256 KiB pieces). */
+    uint8_t block[MAX_REQUEST_LEN];
+    if (length > MAX_REQUEST_LEN ||
+        !piece_manager_read_block(pm, pi, begin, length, block))
+        return -1;
 
     /* Header: [4:len=9+block][1:id=7][4:index][4:begin] */
     uint8_t hdr[13];
@@ -492,9 +520,7 @@ static int serve_block(Session *s, PieceManager *pm,
     write_uint32_be(hdr + 5,  (uint32_t)pi);
     write_uint32_be(hdr + 9,  (uint32_t)begin);
     int rc = (nb_send(s->sock, hdr, 13) == 0 &&
-              nb_send(s->sock, piece_data + begin, (size_t)length) == 0) ? 0 : -2;
-
-    free(piece_data);
+              nb_send(s->sock, block, (size_t)length) == 0) ? 0 : -2;
     if (rc < 0) return rc;
     LOG_DEBUG("seed: %s:%d ← piece %d begin=%d len=%d",
               s->ip, s->port, pi, begin, length);
@@ -533,6 +559,7 @@ static void session_close(Session *s, int epfd) {
         epoll_ctl(epfd, EPOLL_CTL_DEL, s->sock, NULL);
         close(s->sock); s->sock = -1;
     }
+    avail_apply(s->peer_bitfield, -1);
     free(s->peer_bitfield); s->peer_bitfield = NULL;
     rbuf_free(&s->rbuf);
     s->pend_count = 0;
@@ -563,8 +590,7 @@ static int send_requests(Session *s, const Config *cfg) {
 }
 
 static void assign_piece(Session *s, PieceManager *pm,
-                          const TorrentInfo *torrent,
-                          Session *all, int max_s, const Config *cfg) {
+                          const TorrentInfo *torrent, const Config *cfg) {
     if (s->phase != PS_DOWNLOADING || s->am_choked || s->piece_idx >= 0) return;
 
     /* ── Active-piece memory cap ───────────────────────────────────────────
@@ -601,7 +627,7 @@ static void assign_piece(Session *s, PieceManager *pm,
         return;
     }
     /* ── Normal mode ─────────────────────────────────────────────────────── */
-    int pi = next_rarest(pm, all, max_s, s->peer_bitfield, torrent->num_pieces);
+    int pi = next_rarest(pm, s->peer_bitfield);
     if (pi < 0) { s->phase = PS_IDLE; return; }
     s->piece_idx  = pi;
     s->piece_len  = torrent_get_piece_length(torrent, pi);
@@ -681,8 +707,11 @@ static void dispatch_msg(Session *s, int sidx,
     case MSG_HAVE: {
         if (plen != 4) { s->phase = PS_DEAD; break; }
         uint32_t pi = read_uint32_be(payload);
-        if (pi < (uint32_t)torrent->num_pieces && s->peer_bitfield)
+        if (pi < (uint32_t)torrent->num_pieces && s->peer_bitfield &&
+            !bitfield_has_piece(s->peer_bitfield, (int)pi)) {
             bitfield_set_piece(s->peer_bitfield, (int)pi);
+            if (g_avail) g_avail[pi]++;
+        }
         if (s->phase == PS_IDLE && !s->am_choked) s->phase = PS_DOWNLOADING;
         break;
     }
@@ -691,7 +720,10 @@ static void dispatch_msg(Session *s, int sidx,
         if (!s->peer_bitfield) s->peer_bitfield = xcalloc((size_t)bf_bytes, 1);
         s->bf_len = bf_bytes;
         uint32_t copy = plen < (uint32_t)bf_bytes ? plen : (uint32_t)bf_bytes;
+        avail_apply(s->peer_bitfield, -1);    /* replace, don't double-count */
+        memset(s->peer_bitfield, 0, (size_t)bf_bytes);
         if (copy) memcpy(s->peer_bitfield, payload, copy);   /* payload is NULL when plen == 0 */
+        avail_apply(s->peer_bitfield, +1);
         LOG_INFO("peer %s:%d: BITFIELD", s->ip, s->port);
         break;
     }
@@ -860,12 +892,14 @@ static void handle_session(Session *s, uint32_t ev_flags,
      * requests) in one packet, and no new event fires for bytes already read.
      * So after a handshake completes we fall through to message processing
      * instead of returning. */
-    int filled = 0;
+    int filled = 0, more = 0;
 
     /* ── Outgoing: receive peer's handshake ── */
     if (s->phase == PS_HANDSHAKE) {
-        if (rbuf_fill(&s->rbuf, s->sock) < 0) DROP();
+        int frc = rbuf_fill(&s->rbuf, s->sock);
+        if (frc < 0) DROP();
         filled = 1;
+        more   = frc > 0;
         uint8_t their_hs[HANDSHAKE_LEN];
         if (!rbuf_consume(&s->rbuf, HANDSHAKE_LEN, their_hs)) return;
         int supports_ext = 0;
@@ -894,8 +928,10 @@ static void handle_session(Session *s, uint32_t ev_flags,
 
     /* ── Incoming seed: receive peer's handshake ── */
     else if (s->phase == PS_SEED_HANDSHAKE) {
-        if (rbuf_fill(&s->rbuf, s->sock) < 0) DROP();
+        int frc = rbuf_fill(&s->rbuf, s->sock);
+        if (frc < 0) DROP();
         filled = 1;
+        more   = frc > 0;
         uint8_t their_hs[HANDSHAKE_LEN];
         if (!rbuf_consume(&s->rbuf, HANDSHAKE_LEN, their_hs)) return;
         int supports_ext = 0;
@@ -933,32 +969,40 @@ static void handle_session(Session *s, uint32_t ev_flags,
     /* ── All data-bearing states: read and dispatch messages ── */
     if (!filled) {
         if (!(ev_flags & EPOLLIN)) return;
-        if (rbuf_fill(&s->rbuf, s->sock) < 0) {
+        int frc = rbuf_fill(&s->rbuf, s->sock);
+        if (frc < 0) {
             LOG_INFO("peer %s:%d: disconnected (phase=%d)", s->ip, s->port, s->phase);
             DROP();
         }
+        more = frc > 0;
     }
 
-    while (s->phase != PS_DEAD) {
-        if (s->rbuf.len < 4) break;
-        uint32_t msg_len = read_uint32_be(s->rbuf.data);
-        if (msg_len == 0) { rbuf_consume(&s->rbuf, 4, NULL); continue; }
-        if (msg_len > 16 * 1024 * 1024) DROP();
-        if (s->rbuf.len < 4 + msg_len) break;
+    for (;;) {
+        while (s->phase != PS_DEAD) {
+            if (s->rbuf.len < 4) break;
+            uint8_t *msg = rbuf_peek(&s->rbuf);
+            uint32_t msg_len = read_uint32_be(msg);
+            if (msg_len == 0) { rbuf_consume(&s->rbuf, 4, NULL); continue; }
+            if (msg_len > MAX_MSG_LEN) DROP();
+            if (s->rbuf.len < 4 + (size_t)msg_len) break;
 
-        rbuf_consume(&s->rbuf, 4, NULL);
-        uint8_t wire_id = 0;
-        rbuf_consume(&s->rbuf, 1, &wire_id);
-        uint32_t plen   = msg_len - 1;
-        uint8_t *payload = plen ? xmalloc(plen) : NULL;
-        if (plen) rbuf_consume(&s->rbuf, plen, payload);
+            /* Dispatch straight from the buffer (no per-message copy); the
+             * bytes stay valid until they are consumed below. */
+            uint8_t  wire_id = msg[4];
+            uint32_t plen    = msg_len - 1;
+            dispatch_msg(s, idx, wire_id, plen ? msg + 5 : NULL, plen, epfd,
+                         torrent, pm, all, max_s, cfg, peers);
+            rbuf_consume(&s->rbuf, 4 + (size_t)msg_len, NULL);
 
-        dispatch_msg(s, idx, wire_id, payload, plen, epfd,
-                     torrent, pm, all, max_s, cfg, peers);
-        free(payload);
-
-        if (s->phase == PS_DOWNLOADING && !s->am_choked && s->piece_idx < 0)
-            assign_piece(s, pm, torrent, all, max_s, cfg);
+            if (s->phase == PS_DOWNLOADING && !s->am_choked && s->piece_idx < 0)
+                assign_piece(s, pm, torrent, cfg);
+        }
+        /* Edge-triggered epoll: if the buffer filled before the socket was
+         * drained, no new event will arrive for the bytes still queued. */
+        if (!more || s->phase == PS_DEAD) break;
+        int frc = rbuf_fill(&s->rbuf, s->sock);
+        if (frc < 0) DROP();
+        more = frc > 0;
     }
     /* A handler may have marked the session dead (protocol error or a
      * failed send); release its piece and socket now. */
@@ -1157,6 +1201,9 @@ int scheduler_run(const TorrentInfo *torrent,
     TokenBucket ul_bucket;
     tb_init(&ul_bucket, cfg->upload_limit_kbs);
 
+    g_avail   = xcalloc((size_t)torrent->num_pieces, sizeof(int));
+    g_avail_n = torrent->num_pieces;
+
     Session *sessions = xcalloc((size_t)max_s, sizeof(Session));
     for (int i = 0; i < max_s; i++) {
         sessions[i].sock      = -1;
@@ -1165,7 +1212,10 @@ int scheduler_run(const TorrentInfo *torrent,
     }
 
     int epfd = epoll_create1(EPOLL_CLOEXEC);
-    if (epfd < 0) { free(sessions); return EXIT_FAILURE; }
+    if (epfd < 0) {
+        free(sessions); free(g_avail); g_avail = NULL; g_avail_n = 0;
+        return EXIT_FAILURE;
+    }
 
     /*
      * Listen socket sentinel: we use index max_s in epoll data to
@@ -1282,7 +1332,7 @@ int scheduler_run(const TorrentInfo *torrent,
             for (int i = 0; i < max_s; i++) {
                 Session *s = &sessions[i];
                 if (s->phase == PS_DOWNLOADING && !s->am_choked && s->piece_idx < 0)
-                    assign_piece(s, pm, torrent, sessions, max_s, cfg);
+                    assign_piece(s, pm, torrent, cfg);
             }
         }
 
@@ -1401,7 +1451,7 @@ int scheduler_run(const TorrentInfo *torrent,
 
             if (s->phase == PS_DOWNLOADING && !s->am_choked
                 && s->piece_idx < 0 && s->sock >= 0)
-                assign_piece(s, pm, torrent, sessions, max_s, cfg);
+                assign_piece(s, pm, torrent, cfg);
         }
 
         serve_pending(sessions, max_s, pm, torrent, &ul_bucket, &uploaded);
@@ -1474,5 +1524,8 @@ int scheduler_run(const TorrentInfo *torrent,
     if (listen_sock >= 0) close(listen_sock);
     close(epfd);
     free(sessions);
+    free(g_avail);           /* after the sessions: closing them updates it */
+    g_avail   = NULL;
+    g_avail_n = 0;
     return piece_manager_is_complete(pm) ? EXIT_SUCCESS : EXIT_FAILURE;
 }

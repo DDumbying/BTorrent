@@ -52,7 +52,7 @@ int cmd_check(const Config *cfg) {
     printf("Pieces  : %d × %d KiB\n\n",
            torrent->num_pieces, torrent->piece_length / 1024);
 
-    PieceManager *pm = piece_manager_new(torrent, out_path);
+    PieceManager *pm = piece_manager_new(torrent, out_path, /*use_resume=*/0);
     if (!pm) {
         LOG_ERROR("%s", "Failed to open output files — has the download been started?");
         torrent_free(torrent);

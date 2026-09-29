@@ -79,7 +79,7 @@ int LLVMFuzzerInitialize(int *argc, char ***argv) {
     int fd = open(g_path, O_RDWR | O_CREAT | O_TRUNC, 0600);
     if (fd < 0 || ftruncate(fd, t->total_length) < 0) abort();
     close(fd);
-    g_pm = piece_manager_new(t, g_path);
+    g_pm = piece_manager_new(t, g_path, 0);
     if (!g_pm) abort();
     atexit(remove_files);
 
