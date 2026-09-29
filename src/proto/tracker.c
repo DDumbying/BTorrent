@@ -208,6 +208,66 @@ static PeerList dict_peers(BencodeNode *n) {
 
 /* ── HTTP Tracker ───────────────────────────────────────────────────────────── */
 
+/*
+ * tracker_parse_http_response — parse an HTTP tracker's bencoded reply.
+ * Returns 0 and fills *out (possibly with zero peers) for a valid reply,
+ * -1 for malformed data or a "failure reason". Split out of http_announce
+ * so it can be tested and fuzzed without a network.
+ */
+int tracker_parse_http_response(const uint8_t *data, size_t len, PeerList *out) {
+    *out = (PeerList){NULL, 0, 1800};
+    /* bencode strings point into data (zero-copy); data must outlive root. */
+    BencodeNode *root = bencode_parse(data, len);
+    if (!root) return -1;
+    if (root->type != BENCODE_DICT) { bencode_free(root); return -1; }
+
+    BencodeNode *fail = bencode_dict_get(root, "failure reason");
+    if (fail && fail->type == BENCODE_STR) {
+        LOG_WARN("tracker HTTP failure: %.*s", (int)fail->str.len, fail->str.data);
+        bencode_free(root); return -1;
+    }
+
+    int interval = 1800;
+    BencodeNode *iv = bencode_dict_get(root, "interval");
+    if (iv && iv->type == BENCODE_INT && iv->integer > 0 && iv->integer <= 86400)
+        interval = (int)iv->integer;
+
+    PeerList pl = {NULL, 0, 1800};
+    BencodeNode *pn = bencode_dict_get(root, "peers");
+    if (pn) {
+        pl = (pn->type == BENCODE_STR)
+             ? compact_peers(pn->str.data, pn->str.len)   /* always IPv4; */
+                                                          /* IPv6 is "peers6" */
+             : dict_peers(pn);
+    }
+
+    BencodeNode *p6 = bencode_dict_get(root, "peers6");
+    if (p6 && p6->type == BENCODE_STR) {
+        PeerList pl6 = compact6_peers(p6->str.data, p6->str.len);
+        if (pl6.count > 0 && pl.count > 0) {
+            Peer *merged = realloc(pl.peers,
+                                   (size_t)(pl.count + pl6.count) * sizeof(Peer));
+            if (merged) {
+                pl.peers = merged;
+                memcpy(pl.peers + pl.count, pl6.peers,
+                       (size_t)pl6.count * sizeof(Peer));
+                pl.count += pl6.count;
+            }
+            peer_list_free(&pl6);
+        } else if (pl6.count > 0) {
+            peer_list_free(&pl);
+            pl = pl6;
+        } else {
+            peer_list_free(&pl6);
+        }
+    }
+
+    pl.interval = interval;
+    bencode_free(root);
+    *out = pl;
+    return 0;
+}
+
 static PeerList http_announce(const char *base,
                               const TorrentInfo *t, const uint8_t *pid,
                               uint16_t port, long dl, long ul, long left,
@@ -244,54 +304,9 @@ static PeerList http_announce(const char *base,
 
     if (rc != CURLE_OK || !buf.data) { free(buf.data); return empty; }
 
-    /* bencode strings point into buf.data (zero-copy), so the buffer must
-     * outlive every use of the tree — free both together at the end. */
-    BencodeNode *root = bencode_parse(buf.data, buf.len);
-    if (!root) { free(buf.data); return empty; }
-
-    BencodeNode *fail = bencode_dict_get(root, "failure reason");
-    if (fail && fail->type == BENCODE_STR) {
-        LOG_WARN("tracker HTTP failure: %.*s", (int)fail->str.len, fail->str.data);
-        bencode_free(root); free(buf.data); return empty;
-    }
-
-    *responded = 1;
-    int interval = 1800;
-    BencodeNode *iv = bencode_dict_get(root, "interval");
-    if (iv && iv->type == BENCODE_INT) interval = (int)iv->integer;
-
     PeerList pl = {NULL, 0, 1800};
-    BencodeNode *pn = bencode_dict_get(root, "peers");
-    if (pn) {
-        pl = (pn->type == BENCODE_STR)
-             ? compact_peers(pn->str.data, pn->str.len)   /* always IPv4; */
-                                                          /* IPv6 is "peers6" */
-             : dict_peers(pn);
-    }
-
-    BencodeNode *p6 = bencode_dict_get(root, "peers6");
-    if (p6 && p6->type == BENCODE_STR) {
-        PeerList pl6 = compact6_peers(p6->str.data, p6->str.len);
-        if (pl6.count > 0 && pl.count > 0) {
-            Peer *merged = realloc(pl.peers,
-                                   (size_t)(pl.count + pl6.count) * sizeof(Peer));
-            if (merged) {
-                pl.peers = merged;
-                memcpy(pl.peers + pl.count, pl6.peers,
-                       (size_t)pl6.count * sizeof(Peer));
-                pl.count += pl6.count;
-            }
-            peer_list_free(&pl6);
-        } else if (pl6.count > 0) {
-            peer_list_free(&pl);
-            pl = pl6;
-        } else {
-            peer_list_free(&pl6);
-        }
-    }
-
-    pl.interval = interval;
-    bencode_free(root);
+    if (tracker_parse_http_response(buf.data, buf.len, &pl) == 0)
+        *responded = 1;
     free(buf.data);
     return pl;
 }

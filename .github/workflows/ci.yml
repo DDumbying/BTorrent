@@ -54,8 +54,33 @@ jobs:
       - name: Unit tests under ASan + UBSan
         run: make test SANITIZE=1 WERROR=1
 
+      - name: Replay fuzz corpus under ASan + UBSan
+        run: make fuzz-replay SANITIZE=1 WERROR=1
+
       - name: Smoke test
         run: ./build/btorrent-debug -V
+
+  fuzz:
+    name: fuzz (libFuzzer, 30 s per target)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang make pkg-config libcurl4-openssl-dev
+
+      - name: Fuzz
+        run: make fuzz-run FUZZ_SECONDS=30
+
+      - name: Upload crashing inputs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crashes
+          path: build/fuzz/crash-*
+          if-no-files-found: ignore
 
   deb:
     name: Debian package

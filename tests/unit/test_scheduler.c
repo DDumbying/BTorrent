@@ -114,55 +114,14 @@ static int build_pex_from_list(uint8_t *buf, size_t cap,
 }
 
 /* Parse ut_pex peer's ut_pex ext id from their extension handshake. */
-static void parse_peer_ext_hs(const uint8_t *data, uint32_t len,
-                               int *out_pex_id) {
-    *out_pex_id = -1;
-    const char *needle = "6:ut_pex";
-    size_t nlen = strlen(needle);
-    for (uint32_t i = 0; i + nlen + 3 < len; i++) {
-        if (memcmp(data + i, needle, nlen) != 0) continue;
-        uint32_t j = i + (uint32_t)nlen;
-        if (data[j] != 'i') continue;
-        j++;
-        int val = 0;
-        while (j < len && data[j] >= '0' && data[j] <= '9')
-            val = val * 10 + (data[j++] - '0');
-        if (j < len && data[j] == 'e') *out_pex_id = val;
-        break;
-    }
+/* Thin wrappers so the tests exercise the real parsers, not copies. */
+static void parse_peer_ext_hs(const uint8_t *data, uint32_t len, int *out_pex_id) {
+    *out_pex_id = ext_parse_pex_id(data, len);
 }
 
-/* Parse compact "added" field from a ut_pex payload. */
 static int parse_pex_peers(const uint8_t *payload, uint32_t plen,
                             Peer *out, int max_out) {
-    const char *needle = "5:added";
-    size_t nlen = strlen(needle);
-    int found = 0;
-    for (uint32_t i = 0; i + nlen + 2 < plen; i++) {
-        if (memcmp(payload + i, needle, nlen) != 0) continue;
-        uint32_t j = i + (uint32_t)nlen;
-        int compact_len = 0;
-        while (j < plen && payload[j] >= '0' && payload[j] <= '9')
-            compact_len = compact_len * 10 + (payload[j++] - '0');
-        if (j >= plen || payload[j] != ':') break;
-        j++;
-        for (int k = 0; k + 6 <= compact_len && found < max_out; k += 6) {
-            if (j + (uint32_t)(k + 6) > plen) break;
-            const uint8_t *p = payload + j + k;
-            struct in_addr addr;
-            memcpy(&addr.s_addr, p, 4);
-            char ip[16];
-            if (!inet_ntop(AF_INET, &addr, ip, sizeof(ip))) continue;
-            uint16_t port = (uint16_t)((p[4] << 8) | p[5]);
-            if (port == 0) continue;
-            strncpy(out[found].ip, ip, 15);
-            out[found].ip[15] = '\0';
-            out[found].port   = port;
-            found++;
-        }
-        break;
-    }
-    return found;
+    return pex_parse_added(payload, plen, out, max_out);
 }
 
 /* ── Tests ────────────────────────────────────────────────────────────────── */
@@ -270,6 +229,24 @@ static void test_peer_ext_hs_parser(void) {
     int pex_id4 = -1;
     parse_peer_ext_hs((const uint8_t *)big, (uint32_t)strlen(big), &pex_id4);
     EXPECT(pex_id4 == 12, "parser: multi-digit ut_pex id == 12");
+
+    /* Regression (found by fuzzing): a long digit run overflowed int. */
+    const char *huge = "d1:md6:ut_pexi21244444444444444444444444eee";
+    int pex_id5 = 0;
+    parse_peer_ext_hs((const uint8_t *)huge, (uint32_t)strlen(huge), &pex_id5);
+    EXPECT(pex_id5 == -1, "parser: out-of-range ut_pex id rejected");
+
+    /* 0 means "disabled" (BEP 10); ids must fit the 1-byte message id. */
+    int pex_id6 = 0, pex_id7 = 0;
+    parse_peer_ext_hs((const uint8_t *)"d1:md6:ut_pexi0eee", 18, &pex_id6);
+    parse_peer_ext_hs((const uint8_t *)"d1:md6:ut_pexi256eee", 20, &pex_id7);
+    EXPECT(pex_id6 == -1 && pex_id7 == -1, "parser: ut_pex 0 and 256 rejected");
+
+    /* The old substring scan also matched inside unrelated values. */
+    const char *decoy = "d1:v12:6:ut_pexi7ee";
+    int pex_id8 = 0;
+    parse_peer_ext_hs((const uint8_t *)decoy, (uint32_t)strlen(decoy), &pex_id8);
+    EXPECT(pex_id8 == -1, "parser: ut_pex text inside a value ignored");
 }
 
 static void test_pex_roundtrip(void) {

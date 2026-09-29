@@ -79,6 +79,30 @@ static void test_compact_18_bytes_is_three_ipv4_peers(void) {
     free(pl.peers);
 }
 
+static void test_http_response_parser(void) {
+    PeerList pl;
+    const char ok[] = "d8:intervali900e5:peers12:"
+                      "\x0a\x00\x00\x01\x1a\xe1\x0a\x00\x00\x02\x1a\xe1" "e";
+    ASSERT(tracker_parse_http_response((const uint8_t *)ok, sizeof(ok) - 1, &pl) == 0,
+           "http: valid reply accepted");
+    ASSERT(pl.count == 2 && pl.interval == 900 &&
+           strcmp(pl.peers[1].ip, "10.0.0.2") == 0, "http: peers and interval parsed");
+    peer_list_free(&pl);
+
+    const char fail[] = "d14:failure reason9:not founde";
+    ASSERT(tracker_parse_http_response((const uint8_t *)fail, sizeof(fail) - 1, &pl) == -1 &&
+           pl.count == 0, "http: failure reason rejected");
+
+    const char junk[] = "li1ei2ee";
+    ASSERT(tracker_parse_http_response((const uint8_t *)junk, sizeof(junk) - 1, &pl) == -1,
+           "http: non-dict reply rejected");
+
+    const char bad_iv[] = "d8:intervali-5e5:peers0:e";
+    ASSERT(tracker_parse_http_response((const uint8_t *)bad_iv, sizeof(bad_iv) - 1, &pl) == 0 &&
+           pl.interval == 1800, "http: out-of-range interval ignored");
+    peer_list_free(&pl);
+}
+
 /* ── UDP Cache Tests ──────────────────────────────────────────────────────── */
 
 static void test_udp_cache_init(void) {
@@ -144,6 +168,7 @@ int main(void) {
     test_compact_ipv4_peers();
     test_compact_ipv6_peers();
     test_compact_18_bytes_is_three_ipv4_peers();
+    test_http_response_parser();
 
     printf("\n--- UDP connection ID cache ---\n");
     test_udp_cache_init();
