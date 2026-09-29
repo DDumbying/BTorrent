@@ -4,7 +4,7 @@ Priority: optional
 Maintainer: Saeed Hany <saeed@saeeedhany.github.io>
 Build-Depends: debhelper-compat (= 13), libcurl4-openssl-dev, pkg-config
 Standards-Version: 4.6.2
-Homepage: https://saeeedhany.github.io/btorrent
+Homepage: https://github.com/DDumbying/BTorrent
 Rules-Requires-Root: no
 
 Package: btorrent

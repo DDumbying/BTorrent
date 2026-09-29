@@ -410,8 +410,8 @@ install: all
 # Formula/btorrent.rb
 class Btorrent < Formula
   desc "Educational BitTorrent client"
-  homepage "https://github.com/alsullam/btorrent"
-  url "https://github.com/alsullam/btorrent/archive/v1.0.tar.gz"
+  homepage "https://github.com/DDumbying/BTorrent"
+  url "https://github.com/DDumbying/BTorrent/releases/download/v1.1.0/btorrent-1.1.0.tar.gz"
   depends_on "curl"
   def install
     system "make", "PREFIX=#{prefix}", "install"

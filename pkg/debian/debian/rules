@@ -1,15 +1,22 @@
 #!/usr/bin/make -f
+
+# Export dpkg-buildflags (CFLAGS/LDFLAGS with the distro's hardening) into
+# the environment for our Makefile, and get DEB_VERSION_UPSTREAM.
+DPKG_EXPORT_BUILDFLAGS = 1
+export DEB_BUILD_MAINT_OPTIONS = hardening=+all
+include /usr/share/dpkg/default.mk
+
+# dpkg-buildflags already hardens, so skip the Makefile's own defaults.
+MAKE_ARGS = VERSION=$(DEB_VERSION_UPSTREAM) HARDEN=0 PREFIX=/usr
+
 %:
 	dh $@
 
 override_dh_auto_build:
-	$(MAKE) VERSION=$(DEB_VERSION_UPSTREAM) all
+	$(MAKE) $(MAKE_ARGS) all
 
 override_dh_auto_test:
 	$(MAKE) test
 
 override_dh_auto_install:
-	$(MAKE) install \
-		DESTDIR=$(CURDIR)/debian/btorrent \
-		PREFIX=/usr \
-		VERSION=$(DEB_VERSION_UPSTREAM)
+	$(MAKE) $(MAKE_ARGS) install DESTDIR=$(CURDIR)/debian/btorrent
