@@ -54,37 +54,33 @@ static uint8_t *read_file(const char *path, size_t *out_len) {
 }
 
 /*
- * compute_info_hash — SHA-1 of the raw bencoded bytes of the info dict.
+ * compute_info_hash — SHA-1 of the raw bencoded bytes of the "info" value.
  *
- * FIX: Previous version called bencode_parse() to "find" the end, then
- * discarded the result and re-walked manually. Now we use bencode_parse_ex()
- * which returns the number of bytes consumed, giving us the exact end
- * position with a single parse pass and no dead code.
+ * Walks the top-level dict key by key, so the "info" value is located by
+ * structure. (Searching the raw bytes for "4:info" matched inside earlier
+ * values too — e.g. a comment "information 12" encodes as "14:information 12"
+ * — which rejected valid torrents or could hash the wrong bytes.)
  */
 static int compute_info_hash(const uint8_t *raw, size_t raw_len,
                               uint8_t *info_hash) {
-    const uint8_t needle[] = "4:info";
-    const size_t  needle_len = 6;
-
-    for (size_t i = 0; i + needle_len <= raw_len; i++) {
-        if (memcmp(raw + i, needle, needle_len) != 0) continue;
-
-        size_t info_start = i + needle_len;
-
-        BencodeNode *info_node = NULL;
-        size_t consumed = bencode_parse_ex(raw + info_start,
-                                           raw_len - info_start,
-                                           &info_node);
-        if (consumed == 0 || !info_node) {
-            LOG_ERROR("%s", "failed to parse info dict");
-            return -1;
+    if (raw_len < 2 || raw[0] != 'd') return -1;
+    size_t pos = 1;
+    while (pos < raw_len && raw[pos] != 'e') {
+        BencodeNode *key = NULL, *val = NULL;
+        size_t klen = bencode_parse_ex(raw + pos, raw_len - pos, &key);
+        if (klen == 0 || key->type != BENCODE_STR) { bencode_free(key); break; }
+        pos += klen;
+        size_t vlen = bencode_parse_ex(raw + pos, raw_len - pos, &val);
+        bencode_free(val);
+        if (vlen == 0) { bencode_free(key); break; }
+        int is_info = key->str.len == 4 && memcmp(key->str.data, "info", 4) == 0;
+        bencode_free(key);
+        if (is_info) {
+            sha1(raw + pos, vlen, info_hash);
+            return 0;
         }
-
-        sha1(raw + info_start, consumed, info_hash);
-        bencode_free(info_node);
-        return 0;
+        pos += vlen;
     }
-
     LOG_ERROR("%s", "'info' key not found in torrent file");
     return -1;
 }
@@ -109,12 +105,18 @@ TorrentInfo *torrent_parse(const char *path) {
     size_t   raw_len;
     uint8_t *raw = read_file(path, &raw_len);
     if (!raw) return NULL;
+    TorrentInfo *t = torrent_parse_buffer(raw, raw_len);
+    if (!t) LOG_ERROR("failed to parse torrent file: %s", path);
+    free(raw);
+    return t;
+}
 
+TorrentInfo *torrent_parse_buffer(const uint8_t *raw, size_t raw_len) {
     BencodeNode *root = bencode_parse(raw, raw_len);
-    if (!root) { LOG_ERROR("bencode parse failed: %s", path); free(raw); return NULL; }
+    if (!root) { LOG_ERROR("%s", "bencode parse failed"); return NULL; }
     if (root->type != BENCODE_DICT) {
         LOG_ERROR("%s", "top-level value is not a dict");
-        bencode_free(root); free(raw); return NULL;
+        bencode_free(root); return NULL;
     }
 
     TorrentInfo *t = xcalloc(1, sizeof(TorrentInfo));
@@ -257,8 +259,10 @@ TorrentInfo *torrent_parse(const char *path) {
 
     /* The piece count must match the data size exactly; otherwise piece
      * offsets would point outside the files. */
-    long long expected_pieces =
-        ((long long)t->total_length + t->piece_length - 1) / t->piece_length;
+    /* ceil(total / piece_length) without the overflow of total + pl - 1
+     * (total_length may be close to LONG_MAX). */
+    long long expected_pieces = t->total_length / t->piece_length +
+                                (t->total_length % t->piece_length != 0);
     if (expected_pieces != t->num_pieces) {
         LOG_ERROR("piece count mismatch: %d hashes for %ld bytes "
                   "(expected %lld pieces)",
@@ -269,12 +273,10 @@ TorrentInfo *torrent_parse(const char *path) {
     if (compute_info_hash(raw, raw_len, t->info_hash) < 0) goto fail;
 
     bencode_free(root);
-    free(raw);
     return t;
 
 fail:
     bencode_free(root);
-    free(raw);
     torrent_free(t);
     return NULL;
 }

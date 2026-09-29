@@ -44,7 +44,6 @@
 #include <errno.h>
 #include <sys/socket.h>
 #include <sys/time.h>
-#include <sys/stat.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <arpa/inet.h>
@@ -303,8 +302,7 @@ static int parse_meta_msg(const uint8_t *payload, uint32_t plen, MetaMsg *out) {
  *
  * We prepend:  d4:info
  * and append:  e
- * to form a minimal valid .torrent, write it to a tmpfile, parse it, then
- * delete the tmpfile.
+ * to form a minimal valid .torrent and parse it from memory.
  */
 static TorrentInfo *torrent_info_from_raw_dict(const uint8_t *dict,
                                                size_t         dict_len,
@@ -330,25 +328,8 @@ static TorrentInfo *torrent_info_from_raw_dict(const uint8_t *dict,
     memcpy(fake_torrent + pos, dict, dict_len); pos += dict_len;
     fake_torrent[pos++] = 'e';
 
-    /* Write to a temp file.
-     * Unlink immediately after open — the fd keeps the inode alive for
-     * writing and parsing, but the directory entry is gone instantly so
-     * a SIGKILL leaves nothing behind on disk. */
-    char tmppath[] = "/tmp/btorrent_meta_XXXXXX";
-    int fd = mkstemp(tmppath);
-    if (fd < 0) { free(fake_torrent); return NULL; }
-    unlink(tmppath);   /* directory entry gone; fd still valid */
-
-    ssize_t written = write(fd, fake_torrent, pos);
+    TorrentInfo *ti = torrent_parse_buffer(fake_torrent, pos);
     free(fake_torrent);
-
-    if (written != (ssize_t)pos) { close(fd); return NULL; }
-
-    /* Re-open via /proc/self/fd/<n> so torrent_parse() can read it */
-    char fdpath[64];
-    snprintf(fdpath, sizeof(fdpath), "/proc/self/fd/%d", fd);
-    TorrentInfo *ti = torrent_parse(fdpath);
-    close(fd);
     return ti;
 }
 

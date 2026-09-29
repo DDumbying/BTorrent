@@ -336,6 +336,27 @@ static void test_torrent_validation(void) {
     t = parse_torrent_bytes(
         "d4:infod6:lengthi5e4:name2:ok12:piece lengthi16384e6:pieces", 3, "ee");
     ASSERT(t == NULL, "torrent: piece count / length mismatch rejected");
+
+    /* Regression: the info hash was found by searching the raw bytes for
+     * "4:info", which also matches inside an earlier value — here the
+     * comment "information 12" encodes as "14:information 12". */
+    t = parse_torrent_bytes(
+        "d7:comment14:information 124:infod6:lengthi5e4:name2:ok"
+        "12:piece lengthi16384e6:pieces", 1, "ee");
+    char hex[41] = "";
+    if (t) hex_to_str(t->info_hash, 20, hex);
+    ASSERT(t != NULL && strcmp(hex, "820e87208c75d14705e449daff6b3fe5407eab81") == 0,
+           "torrent: info hash located by structure, not byte search");
+    torrent_free(t);
+
+    /* Parsing from memory gives the same result as parsing the file. */
+    const char buf[] = "d4:infod6:lengthi5e4:name2:ok12:piece lengthi16384e"
+                       "6:pieces20:AAAAAAAAAAAAAAAAAAAAee";
+    t = torrent_parse_buffer((const uint8_t *)buf, sizeof(buf) - 1);
+    if (t) hex_to_str(t->info_hash, 20, hex);
+    ASSERT(t != NULL && strcmp(hex, "820e87208c75d14705e449daff6b3fe5407eab81") == 0,
+           "torrent: torrent_parse_buffer matches file parse");
+    torrent_free(t);
 }
 
 static void test_bencode_depth_limit(void) {

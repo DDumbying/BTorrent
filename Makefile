@@ -186,6 +186,63 @@ test_tracker_v6: | build
 
 test: test_sha1 test_peer test_pieces test_magnet test_ext test_scheduler test_publish test_circuit test_netio test_tracker_v6
 
+## ── Fuzzing ───────────────────────────────────────────────────────────────
+##   make fuzz                     build libFuzzer targets (needs clang)
+##   make fuzz-run FUZZ_SECONDS=N  fuzz each target for N s (default 60),
+##                                 starting from tests/fuzz/corpus/<target>
+##   make fuzz-replay              replay the corpus with $(CC) as a regression
+##                                 test (add SANITIZE=1 for ASan + UBSan)
+## Crashes are written to build/fuzz/crash-<target>-*; to keep one as a
+## regression input, copy it into tests/fuzz/corpus/<target>/.
+FUZZ_TARGETS = bencode torrent magnet tracker dht ext wire
+FUZZ_CC     ?= clang
+FUZZ_SECONDS ?= 60
+FUZZ_FLAGS   = $(CSTD) $(IFLAGS) -Itests/fuzz $(CURL_CFLAGS) -g -O1 \
+               -DBT_VERSION=\"$(VERSION)\" -D_FILE_OFFSET_BITS=64
+FUZZ_BASE    = src/utils.c src/log.c src/result.c
+
+## Sources each target links. Targets that #include a .c file (dht, ext,
+## wire — to reach static functions) must not link that file again.
+FUZZ_SRCS_bencode = src/core/bencode.c
+FUZZ_SRCS_torrent = src/core/torrent.c src/core/bencode.c src/core/sha1.c
+FUZZ_SRCS_magnet  = src/core/magnet.c
+FUZZ_SRCS_tracker = src/proto/tracker.c src/core/bencode.c
+FUZZ_SRCS_dht     = src/core/bencode.c
+FUZZ_SRCS_ext     = src/core/torrent.c src/core/bencode.c src/core/sha1.c \
+                    src/proto/ext_handshake.c src/proto/tracker.c
+FUZZ_SRCS_wire    = src/core/pieces.c src/core/torrent.c src/core/bencode.c \
+                    src/core/sha1.c src/proto/peer.c src/proto/tracker.c \
+                    src/proto/ext_handshake.c src/net/tcp.c
+
+fuzz: $(addprefix build/fuzz/fuzz_,$(FUZZ_TARGETS))
+
+build/fuzz/fuzz_%: tests/fuzz/fuzz_%.c FORCE | build
+	@mkdir -p build/fuzz
+	$(FUZZ_CC) $(FUZZ_FLAGS) -fsanitize=fuzzer,address,undefined \
+	    -fno-sanitize-recover=all $< $(FUZZ_SRCS_$*) $(FUZZ_BASE) -o $@ $(LIBS)
+
+build/fuzz/replay_%: tests/fuzz/fuzz_%.c tests/fuzz/replay_main.c FORCE | build
+	@mkdir -p build/fuzz
+	$(CC) $(TEST_FLAGS) -Itests/fuzz $(CURL_CFLAGS) -DBT_VERSION=\"$(VERSION)\" \
+	    $< tests/fuzz/replay_main.c $(FUZZ_SRCS_$*) $(FUZZ_BASE) -o $@ $(LIBS)
+
+fuzz-run: fuzz
+	@for t in $(FUZZ_TARGETS); do \
+	    echo "--- fuzz_$$t ($(FUZZ_SECONDS)s)"; \
+	    mkdir -p build/fuzz/corpus/$$t && \
+	    cp -n tests/fuzz/corpus/$$t/* build/fuzz/corpus/$$t/ 2>/dev/null; \
+	    ./build/fuzz/fuzz_$$t -max_total_time=$(FUZZ_SECONDS) -print_final_stats=1 \
+	        -artifact_prefix=build/fuzz/crash-$$t- \
+	        build/fuzz/corpus/$$t tests/fuzz/corpus/$$t || exit 1; \
+	done
+
+fuzz-replay: $(addprefix build/fuzz/replay_,$(FUZZ_TARGETS))
+	@for t in $(FUZZ_TARGETS); do \
+	    printf 'fuzz_%-8s ' $$t; ./build/fuzz/replay_$$t tests/fuzz/corpus/$$t || exit 1; \
+	done
+
+FORCE:
+
 ## ── Clean ─────────────────────────────────────────────────────────────────
 clean:
 	rm -rf build
@@ -195,5 +252,5 @@ distclean: clean
 
 .PHONY: all debug install uninstall dist \
         test test_sha1 test_peer test_pieces test_magnet test_ext test_scheduler test_publish \
-        test_circuit test_netio test_tracker_v6 \
+        test_circuit test_netio test_tracker_v6 fuzz fuzz-run fuzz-replay FORCE \
         clean distclean

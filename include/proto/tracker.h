@@ -77,3 +77,6 @@ void peer_list_free(PeerList *pl);
 
 PeerList compact_peers(const uint8_t *d, size_t len);
 PeerList compact6_peers(const uint8_t *d, size_t len);
+
+/** Parse an HTTP tracker reply: 0 on success (fills *out), -1 if invalid. */
+int      tracker_parse_http_response(const uint8_t *data, size_t len, PeerList *out);

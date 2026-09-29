@@ -87,6 +87,15 @@ typedef struct {
 TorrentInfo *torrent_parse(const char *path);
 
 /**
+ * torrent_parse_buffer - parse .torrent contents already in memory.
+ *
+ * Same validation and result as torrent_parse(); the buffer is not retained
+ * (every field is copied). Used for metadata fetched from peers (magnet
+ * links) and by the fuzzers.
+ */
+TorrentInfo *torrent_parse_buffer(const uint8_t *data, size_t len);
+
+/**
  * torrent_free - free a TorrentInfo and its allocated fields.
  */
 void torrent_free(TorrentInfo *t);

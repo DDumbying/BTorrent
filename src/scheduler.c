@@ -743,7 +743,7 @@ static void dispatch_msg(Session *s, int sidx,
         if (!s->peer_bitfield) s->peer_bitfield = xcalloc((size_t)bf_bytes, 1);
         s->bf_len = bf_bytes;
         uint32_t copy = plen < (uint32_t)bf_bytes ? plen : (uint32_t)bf_bytes;
-        memcpy(s->peer_bitfield, payload, copy);
+        if (copy) memcpy(s->peer_bitfield, payload, copy);   /* payload is NULL when plen == 0 */
         LOG_INFO("peer %s:%d: BITFIELD", s->ip, s->port);
         break;
     }

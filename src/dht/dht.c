@@ -167,6 +167,97 @@ static void send_to_node(DhtCtx *ctx, DhtNode *node,
            (struct sockaddr *)&node->addr, sizeof(node->addr));
 }
 
+/*
+ * process_reply — handle one KRPC datagram received during a lookup.
+ * Appends any peers to found[] (up to max_found) and learns closer nodes.
+ * Replies are only accepted from a node we queried, echoing its transaction
+ * id. Split out of dht_get_peers so the fuzzer can drive it directly.
+ */
+static void process_reply(DhtCtx *ctx, const uint8_t *resp, size_t rlen,
+                          const struct sockaddr_in *from,
+                          Peer *found, int max_found, int *num_found) {
+    BencodeNode *root = bencode_parse(resp, rlen);
+    if (!root) return;
+
+    BencodeNode *y = bencode_dict_get(root, "y");
+    if (!y || y->type != BENCODE_STR ||
+        y->str.len < 1 || y->str.data[0] != 'r') {
+        bencode_free(root);
+        return;
+    }
+
+    BencodeNode *r = bencode_dict_get(root, "r");
+    if (!r || r->type != BENCODE_DICT) {
+        bencode_free(root);
+        return;
+    }
+
+    /* Only accept replies to our own queries: the sender must be a
+     * node we queried that has not answered yet, and it must echo
+     * that query's transaction id. Anything else is unsolicited and
+     * could be an attempt to inject fake peers. */
+    char fip[INET_ADDRSTRLEN];
+    inet_ntop(AF_INET, &from->sin_addr, fip, sizeof(fip));
+    uint16_t fport = ntohs(from->sin_port);
+    DhtNode *responder = NULL;
+    for (int i = 0; i < ctx->num_nodes; i++) {
+        DhtNode *nd = &ctx->nodes[i];
+        if (nd->addr.sin_addr.s_addr == from->sin_addr.s_addr &&
+            nd->addr.sin_port == from->sin_port) {
+            responder = nd;
+            break;
+        }
+    }
+    BencodeNode *t = bencode_dict_get(root, "t");
+    if (!responder || !responder->queried || responder->responded ||
+        !t || t->type != BENCODE_STR ||
+        t->str.len != sizeof(responder->tid) ||
+        memcmp(t->str.data, responder->tid, sizeof(responder->tid)) != 0) {
+        LOG_DEBUG("dht: dropping unsolicited reply from %s:%d",
+                  fip, (int)fport);
+        bencode_free(root);
+        return;
+    }
+    responder->responded = 1;
+    BencodeNode *id_n = bencode_dict_get(r, "id");
+    if (id_n && id_n->type == BENCODE_STR &&
+        id_n->str.len == DHT_ID_LEN)
+        memcpy(responder->id, id_n->str.data, DHT_ID_LEN);
+
+    /* Peers in values list */
+    BencodeNode *values = bencode_dict_get(r, "values");
+    if (values && values->type == BENCODE_LIST) {
+        int max_room = max_found - *num_found;
+        int peers_this_response = 0;
+        for (size_t vi = 0; vi < values->list.count && max_room > 0; vi++) {
+            BencodeNode *v = values->list.items[vi];
+            if (v->type != BENCODE_STR || v->str.len < 6) continue;
+            int np = parse_peers(v->str.data, v->str.len,
+                                  found + *num_found, max_room);
+            *num_found         += np;
+            max_room           -= np;
+            peers_this_response += np;
+        }
+        if (peers_this_response > 0)
+            LOG_INFO("dht: %d peer%s from %s:%d",
+                     peers_this_response,
+                     peers_this_response == 1 ? "" : "s",
+                     fip, (int)fport);
+    }
+
+    /* Closer nodes */
+    BencodeNode *nodes_n = bencode_dict_get(r, "nodes");
+    if (nodes_n && nodes_n->type == BENCODE_STR) {
+        int before = ctx->num_nodes;
+        parse_nodes(ctx, nodes_n->str.data, nodes_n->str.len);
+        if (ctx->num_nodes > before)
+            LOG_INFO("dht: +%d nodes from %s",
+                     ctx->num_nodes - before, fip);
+    }
+
+    bencode_free(root);
+}
+
 /* ── Public API ──────────────────────────────────────────────────────────── */
 
 DhtCtx *dht_new(uint16_t port) {
@@ -266,86 +357,8 @@ PeerList dht_get_peers(DhtCtx *ctx, const uint8_t *info_hash, int timeout_s,
                                      (struct sockaddr *)&from, &flen);
             if (rlen <= 0) break;
 
-            BencodeNode *root = bencode_parse(resp, (size_t)rlen);
-            if (!root) continue;
-
-            BencodeNode *y = bencode_dict_get(root, "y");
-            if (!y || y->type != BENCODE_STR ||
-                y->str.len < 1 || y->str.data[0] != 'r') {
-                bencode_free(root);
-                continue;
-            }
-
-            BencodeNode *r = bencode_dict_get(root, "r");
-            if (!r || r->type != BENCODE_DICT) {
-                bencode_free(root);
-                continue;
-            }
-
-            /* Only accept replies to our own queries: the sender must be a
-             * node we queried that has not answered yet, and it must echo
-             * that query's transaction id. Anything else is unsolicited and
-             * could be an attempt to inject fake peers. */
-            char fip[INET_ADDRSTRLEN];
-            inet_ntop(AF_INET, &from.sin_addr, fip, sizeof(fip));
-            uint16_t fport = ntohs(from.sin_port);
-            DhtNode *responder = NULL;
-            for (int i = 0; i < ctx->num_nodes; i++) {
-                DhtNode *nd = &ctx->nodes[i];
-                if (nd->addr.sin_addr.s_addr == from.sin_addr.s_addr &&
-                    nd->addr.sin_port == from.sin_port) {
-                    responder = nd;
-                    break;
-                }
-            }
-            BencodeNode *t = bencode_dict_get(root, "t");
-            if (!responder || !responder->queried || responder->responded ||
-                !t || t->type != BENCODE_STR ||
-                t->str.len != sizeof(responder->tid) ||
-                memcmp(t->str.data, responder->tid, sizeof(responder->tid)) != 0) {
-                LOG_DEBUG("dht: dropping unsolicited reply from %s:%d",
-                          fip, (int)fport);
-                bencode_free(root);
-                continue;
-            }
-            responder->responded = 1;
-            BencodeNode *id_n = bencode_dict_get(r, "id");
-            if (id_n && id_n->type == BENCODE_STR &&
-                id_n->str.len == DHT_ID_LEN)
-                memcpy(responder->id, id_n->str.data, DHT_ID_LEN);
-
-            /* Peers in values list */
-            BencodeNode *values = bencode_dict_get(r, "values");
-            if (values && values->type == BENCODE_LIST) {
-                int max_room = (int)(sizeof(found)/sizeof(found[0])) - num_found;
-                int peers_this_response = 0;
-                for (size_t vi = 0; vi < values->list.count && max_room > 0; vi++) {
-                    BencodeNode *v = values->list.items[vi];
-                    if (v->type != BENCODE_STR || v->str.len < 6) continue;
-                    int np = parse_peers(v->str.data, v->str.len,
-                                          found + num_found, max_room);
-                    num_found          += np;
-                    max_room           -= np;
-                    peers_this_response += np;
-                }
-                if (peers_this_response > 0)
-                    LOG_INFO("dht: %d peer%s from %s:%d",
-                             peers_this_response,
-                             peers_this_response == 1 ? "" : "s",
-                             fip, (int)fport);
-            }
-
-            /* Closer nodes */
-            BencodeNode *nodes_n = bencode_dict_get(r, "nodes");
-            if (nodes_n && nodes_n->type == BENCODE_STR) {
-                int before = ctx->num_nodes;
-                parse_nodes(ctx, nodes_n->str.data, nodes_n->str.len);
-                if (ctx->num_nodes > before)
-                    LOG_INFO("dht: +%d nodes from %s",
-                             ctx->num_nodes - before, fip);
-            }
-
-            bencode_free(root);
+            process_reply(ctx, resp, (size_t)rlen, &from,
+                          found, (int)(sizeof(found) / sizeof(found[0])), &num_found);
         }
 
         /* Sort by closeness to info_hash for next round */
