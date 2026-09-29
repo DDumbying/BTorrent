@@ -368,58 +368,6 @@ static int send_pex(Session *s, Session *all, int max_s, int self_idx) {
     return send_ext_msg(s->sock, (uint8_t)s->peer_pex_id, body, (size_t)blen);
 }
 
-/* Parse ut_pex peer's advertised ut_pex ext ID from their ext handshake. */
-static void parse_peer_ext_hs(const uint8_t *data, uint32_t len,
-                               int *out_pex_id) {
-    *out_pex_id = -1;
-    const char *needle = "6:ut_pex";
-    size_t nlen = strlen(needle);
-    for (uint32_t i = 0; i + nlen + 3 < len; i++) {
-        if (memcmp(data + i, needle, nlen) != 0) continue;
-        uint32_t j = i + (uint32_t)nlen;
-        if (data[j] != 'i') continue;
-        j++;
-        int val = 0;
-        while (j < len && data[j] >= '0' && data[j] <= '9')
-            val = val * 10 + (data[j++] - '0');
-        if (j < len && data[j] == 'e') *out_pex_id = val;
-        break;
-    }
-}
-
-/* Parse the compact "added" field from a ut_pex data payload. */
-static int parse_pex_peers(const uint8_t *payload, uint32_t plen,
-                            Peer *out, int max_out) {
-    const char *needle = "5:added";
-    size_t nlen = strlen(needle);
-    int found = 0;
-    for (uint32_t i = 0; i + nlen + 2 < plen; i++) {
-        if (memcmp(payload + i, needle, nlen) != 0) continue;
-        uint32_t j = i + (uint32_t)nlen;
-        int compact_len = 0;
-        while (j < plen && payload[j] >= '0' && payload[j] <= '9')
-            compact_len = compact_len * 10 + (payload[j++] - '0');
-        if (j >= plen || payload[j] != ':') break;
-        j++;
-        for (int k = 0; k + 6 <= compact_len && found < max_out; k += 6) {
-            if (j + (uint32_t)(k + 6) > plen) break;
-            const uint8_t *p = payload + j + k;
-            struct in_addr addr;
-            memcpy(&addr.s_addr, p, 4);
-            char ip[16];
-            if (!inet_ntop(AF_INET, &addr, ip, sizeof(ip))) continue;
-            uint16_t port = (uint16_t)((p[4] << 8) | p[5]);
-            if (port == 0) continue;
-            strncpy(out[found].ip, ip, 15);
-            out[found].ip[15] = '\0';
-            out[found].port   = port;
-            found++;
-        }
-        break;
-    }
-    return found;
-}
-
 /* Merge new peers into the pool, deduplicating by IP:port. */
 static int inject_peers(PeerList *peers, const Peer *new_peers, int count) {
     int added = 0;
@@ -851,12 +799,12 @@ static void dispatch_msg(Session *s, int sidx,
 
         if (sub == 0) {
             /* Extension handshake */
-            parse_peer_ext_hs(payload + 1, plen - 1, &s->peer_pex_id);
+            s->peer_pex_id = ext_parse_pex_id(payload + 1, plen - 1);
             LOG_DEBUG("peer %s:%d: ext hs, pex_id=%d", s->ip, s->port, s->peer_pex_id);
         } else if (sub == PEX_LOCAL_ID) {
             /* ut_pex data */
             Peer new_peers[50] = {0};
-            int n = parse_pex_peers(payload + 1, plen - 1, new_peers, 50);
+            int n = pex_parse_added(payload + 1, plen - 1, new_peers, 50);
             if (n > 0) {
                 int added = inject_peers(peers, new_peers, n);
                 if (added > 0)

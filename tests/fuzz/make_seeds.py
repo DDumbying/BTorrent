@@ -73,6 +73,7 @@ write('ext', 'handshake', be({'m': {'ut_metadata': 3, 'ut_pex': 1},
                               'metadata_size': 31235, 'v': 'libtorrent/2.0'}))
 write('ext', 'data', be({'msg_type': 1, 'piece': 0, 'total_size': 5}) + b'hello')
 write('ext', 'reject', be({'msg_type': 2, 'piece': 1}))
+write('ext', 'pex', be({'added': compact, 'added.f': b'\x00\x00\x00', 'dropped': b''}))
 
 # ── wire: byte 0 = mode (bit0 incoming, bit1 handshake done), then peer bytes
 info_hash = b'I' * 20
